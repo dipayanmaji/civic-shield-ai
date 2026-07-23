@@ -283,8 +283,14 @@ function MediaPreview({ file, index, onRemove }: { file: File; index: number; on
   const [url, setUrl] = useState("");
   useEffect(() => {
     const objectUrl = URL.createObjectURL(file);
-    setUrl(objectUrl);
-    return () => URL.revokeObjectURL(objectUrl);
+    let active = true;
+    queueMicrotask(() => {
+      if (active) setUrl(objectUrl);
+    });
+    return () => {
+      active = false;
+      URL.revokeObjectURL(objectUrl);
+    };
   }, [file]);
 
   const isVideo = file.type.startsWith("video/");

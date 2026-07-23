@@ -26,11 +26,9 @@ function isAppInstalled() {
 export function PwaInstallButton({ className }: { className?: string }) {
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [message, setMessage] = useState("");
-  const [installed, setInstalled] = useState(false);
+  const [installed, setInstalled] = useState(isAppInstalled);
 
   useEffect(() => {
-    setInstalled(isAppInstalled());
-
     const handleBeforeInstallPrompt = (event: Event) => {
       event.preventDefault();
       setInstallPrompt(event as BeforeInstallPromptEvent);
