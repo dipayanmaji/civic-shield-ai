@@ -15,13 +15,14 @@ const maxRecordingMs = 30000;
 export function CivicSenseFab() {
   const [open, setOpen] = useState(false);
   const [experience, setExperience] = useState("");
+  const [instagramUsername, setInstagramUsername] = useState("");
   const [media, setMedia] = useState<File[]>([]);
   const [recordingMode, setRecordingMode] = useState<RecordingMode>(null);
   const [location, setLocation] = useState<Coordinates | null>(null);
   const [locationLabel, setLocationLabel] = useState("");
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [success, setSuccess] = useState<{ id: string; handle: string } | null>(null);
+  const [success, setSuccess] = useState<{ id: string } | null>(null);
   const [consent, setConsent] = useState(false);
   const [cameraFacing, setCameraFacing] = useState<CameraFacing>("environment");
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -97,6 +98,7 @@ export function CivicSenseFab() {
   function closeDialog() {
     cleanupRecording(false);
     setExperience("");
+    setInstagramUsername("");
     setMedia([]);
     setLocation(null);
     setLocationLabel("");
@@ -114,10 +116,19 @@ export function CivicSenseFab() {
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia(mode === "video" ? { audio: true, video: { facingMode: cameraFacing } } : { audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia(mode === "video" ? {
+        audio: true,
+        video: {
+          facingMode: { ideal: cameraFacing },
+          width: { ideal: 1080 },
+          height: { ideal: 1920 },
+          aspectRatio: { ideal: 9 / 16 },
+        },
+      } : { audio: true });
       streamRef.current = stream;
       chunksRef.current = [];
-      const recorder = new MediaRecorder(stream);
+      const recordingMimeType = getPreferredRecordingMimeType(mode);
+      const recorder = recordingMimeType ? new MediaRecorder(stream, { mimeType: recordingMimeType }) : new MediaRecorder(stream);
       recorderRef.current = recorder;
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) chunksRef.current.push(event.data);
@@ -127,11 +138,12 @@ export function CivicSenseFab() {
           chunksRef.current = [];
           return;
         }
-        const type = mode === "video" ? "video/webm" : "audio/webm";
+        const type = baseMediaMimeType(recorder.mimeType || recordingMimeType || (mode === "video" ? "video/webm" : "audio/webm"));
         const blob = new Blob(chunksRef.current, { type });
         if (blob.size > 0) {
           const prefix = mode === "video" ? "video" : "voice";
-          setMedia((current) => [new File([blob], `civic-sense-${prefix}-${Date.now()}.webm`, { type }), ...current].slice(0, maxMediaFiles));
+          const extension = type.includes("mp4") ? "mp4" : type.includes("quicktime") ? "mov" : "webm";
+          setMedia((current) => [new File([blob], `civic-sense-${prefix}-${Date.now()}.${extension}`, { type }), ...current].slice(0, maxMediaFiles));
         }
       };
       saveRecordingRef.current = true;
@@ -157,6 +169,7 @@ export function CivicSenseFab() {
     try {
       const formData = new FormData();
       formData.set("experience", experience);
+      formData.set("instagramUsername", instagramUsername);
       formData.set("locationLabel", locationLabel);
       if (location) {
         formData.set("latitude", String(location.latitude));
@@ -166,8 +179,9 @@ export function CivicSenseFab() {
       const response = await fetch("/api/civic-sense", { method: "POST", body: formData });
       const payload = await response.json() as { submissionId?: string; instagramHandle?: string; error?: string };
       if (!response.ok || !payload.submissionId) throw new Error(payload.error ?? "Submission failed.");
-      setSuccess({ id: payload.submissionId, handle: payload.instagramHandle ?? "civicshield ai" });
+      setSuccess({ id: payload.submissionId });
       setExperience("");
+      setInstagramUsername("");
       setMedia([]);
       setConsent(false);
       setStatus("");
@@ -210,7 +224,8 @@ export function CivicSenseFab() {
               {success ? (
                 <div className="rounded-3xl border border-[#cbe8dd] bg-[#effaf5] p-6 text-[#31544b]">
                   <p className="font-display text-2xl font-bold">CivicShield team received your post.</p>
-                  <p className="mt-3 leading-7">We will review it and post it soon from {success.handle}. Your reference is <strong>{success.id}</strong>.</p>
+                  <p className="mt-3 leading-7">It may take up to 24 hours to verify and post your Zero Civic Sense report to our Instagram. Your reference is <strong>{success.id}</strong>.</p>
+                  <p className="mt-3 leading-7">Meanwhile, check out CivicShield on <a className="font-bold text-brand underline underline-offset-4" href="https://www.instagram.com/civicshieldai/" rel="noreferrer" target="_blank">Instagram</a> and <a className="font-bold text-brand underline underline-offset-4" href="https://www.facebook.com/civicshieldai/" rel="noreferrer" target="_blank">Facebook</a>.</p>
                   <Button className="mt-5" onClick={closeDialog}>Done</Button>
                 </div>
               ) : (
@@ -220,9 +235,15 @@ export function CivicSenseFab() {
                     <textarea className="mt-2 min-h-32 w-full rounded-2xl border border-line p-4 text-sm leading-6 outline-none focus:border-brand" value={experience} onChange={(event) => setExperience(event.target.value)} placeholder="Example: People kept throwing plastic cups from a bus stop even though a bin was nearby." />
                   </label>
 
+                  <label className="block">
+                    <span className="text-sm font-bold text-ink">Your Instagram username <span className="font-medium text-muted">(optional)</span></span>
+                    <input className="mt-2 w-full rounded-2xl border border-line px-4 py-3 text-sm outline-none focus:border-brand" value={instagramUsername} onChange={(event) => setInstagramUsername(event.target.value)} maxLength={31} placeholder="username (we will credit you only if approved)" autoCapitalize="none" autoCorrect="off" />
+                    <span className="mt-1 block text-xs leading-5 text-muted">If this post is approved, we will add @{instagramUsername.trim().replace(/^@+/, "") || "yourusername"} to the caption.</span>
+                  </label>
+
                   {recordingMode === "video" ? (
                     <div className="overflow-hidden rounded-3xl border border-[#d7e6e1] bg-[#0f1d1a]">
-                      <video ref={videoPreviewRef} className="aspect-video w-full object-cover" autoPlay muted playsInline />
+                      <video ref={videoPreviewRef} className="mx-auto aspect-[9/16] max-h-[58vh] w-full max-w-sm object-cover" autoPlay muted playsInline />
                       <div className="flex items-center justify-between gap-3 p-3 text-white">
                         <span className="text-sm font-bold">Recording video · auto-stops at 30 sec</span>
                         <Button variant="danger" size="sm" onClick={stopRecording}><Pause size={16} /> Stop</Button>
@@ -256,7 +277,7 @@ export function CivicSenseFab() {
 
                   <div className="rounded-2xl border border-line bg-[#fbfdfc] p-4 text-sm leading-6 text-muted">
                     <p><strong className="text-ink">Location:</strong> {locationLabel || (location ? "Location captured" : "Requesting location...")}</p>
-                    <p className="mt-1"><strong className="text-ink">Media:</strong> max {maxMediaFiles} files · 30 sec recommended</p>
+                    <p className="mt-1"><strong className="text-ink">Media:</strong> max {maxMediaFiles} files · 30 sec recommended · for Instagram video, upload MP4 or MOV.</p>
                     {media.length ? <div className="mt-3 space-y-2">{media.map((file, index) => <MediaPreview file={file} index={index} key={`${file.name}-${file.lastModified}-${index}`} onRemove={() => removeMedia(index)} />)}</div> : <p className="mt-2 text-xs">No media selected yet.</p>}
                   </div>
 
@@ -268,7 +289,7 @@ export function CivicSenseFab() {
                   <Button className="w-full" disabled={!canSubmit} onClick={() => void submit()} size="lg">
                     <Send size={18} /> {submitting ? "Submitting..." : "Submit to CivicShield team"}
                   </Button>
-                  {status ? <p className="text-sm font-semibold text-muted">{status}</p> : null}
+                  {status ? <p className={`rounded-2xl border px-4 py-3 text-sm font-semibold leading-6 ${status.includes("failed") || status.includes("could not") || status.includes("Please") ? "border-[#efc7bf] bg-[#fff8f6] text-danger" : "border-[#cbe8dd] bg-brand-soft text-brand"}`} role="status">{status}</p> : null}
                 </>
               )}
             </div>
@@ -306,7 +327,7 @@ function MediaPreview({ file, index, onRemove }: { file: File; index: number; on
         </button>
       </div>
       {url ? (
-        isVideo ? <video className="mt-3 aspect-video w-full rounded-xl bg-[#101a18] object-cover" controls src={url} /> : <audio className="mt-3 w-full" controls src={url}><Play size={14} /></audio>
+        isVideo ? <video className="mt-3 max-h-[28rem] w-full rounded-xl bg-[#101a18] object-contain" controls src={url} /> : <audio className="mt-3 w-full" controls src={url}><Play size={14} /></audio>
       ) : null}
     </div>
   );
@@ -327,4 +348,15 @@ function getVideoDuration(file: File) {
     };
     video.src = url;
   });
+}
+
+function getPreferredRecordingMimeType(mode: Exclude<RecordingMode, null>) {
+  const candidates = mode === "video"
+    ? ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm"]
+    : ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"];
+  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
+}
+
+function baseMediaMimeType(value: string) {
+  return value.split(";", 1)[0]?.trim().toLowerCase() || "application/octet-stream";
 }

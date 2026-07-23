@@ -79,6 +79,22 @@ create table if not exists public.civic_sense_submissions (
   updated_at timestamptz not null default now()
 );
 
+-- One moderator-managed Instagram Page connection. The page access token is only
+-- accessed by server routes using SUPABASE_SERVICE_ROLE_KEY; it is never sent to browsers.
+create table if not exists public.instagram_integrations (
+  id bigint generated always as identity primary key,
+  integration_key text unique not null default 'civicshield',
+  page_id text not null,
+  page_name text,
+  ig_user_id text not null,
+  instagram_username text,
+  page_access_token text not null,
+  connected_at timestamptz not null default now(),
+  last_validated_at timestamptz,
+  last_error text,
+  updated_at timestamptz not null default now()
+);
+
 alter table public.civic_sense_submissions add column if not exists media_urls text[] not null default '{}';
 alter table public.civic_sense_submissions add column if not exists instagram_media_id text;
 alter table public.civic_sense_submissions add column if not exists instagram_post_url text;
@@ -88,12 +104,14 @@ create index if not exists report_status_events_report_idx on public.report_stat
 create index if not exists emergency_reports_public_created_idx on public.emergency_reports (public_visible, created_at desc);
 create index if not exists community_verifications_report_idx on public.community_verifications (report_id, created_at desc);
 create index if not exists civic_sense_submissions_created_idx on public.civic_sense_submissions (status, created_at desc);
+create index if not exists instagram_integrations_connected_idx on public.instagram_integrations (connected_at desc);
 
 alter table public.civic_reports enable row level security;
 alter table public.report_status_events enable row level security;
 alter table public.emergency_reports enable row level security;
 alter table public.community_verifications enable row level security;
 alter table public.civic_sense_submissions enable row level security;
+alter table public.instagram_integrations enable row level security;
 
 -- No anon/authenticated policies by design. Only server code using the service-role key
 -- can read or write rows. Do not add a broad public select policy.

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { allowRequest, rateLimitedResponse } from "@/lib/security/rate-limit";
+import { sendTeamNotification } from "@/lib/notifications/team-email";
 import { createEmergencyReport, getEmergencyReports } from "@/lib/supabase/emergency";
 import { isSupabaseConfigured } from "@/lib/supabase/server";
 import type { EmergencyReport, UrgencyLevel } from "@/types/report";
@@ -55,6 +56,22 @@ export async function POST(request: Request) {
       details: report.details,
       isSafe: Boolean(report.isSafe),
     });
+    const mapUrl = report.latitude != null && report.longitude != null
+      ? `https://www.google.com/maps/search/?api=1&query=${report.latitude},${report.longitude}`
+      : "Not available";
+    await sendTeamNotification({
+      subject: `New CivicShield emergency alert ${emergencyId}`,
+      body: [
+        `Emergency reference: ${emergencyId}`,
+        `Type: ${report.type}`,
+        `Location: ${report.locationLabel}`,
+        `Map: ${mapUrl}`,
+        `Details: ${report.details?.trim() || "Not provided"}`,
+        `User marked safe: ${report.isSafe ? "Yes" : "No"}`,
+        "",
+        "This is a CivicShield incident record. In immediate danger, call 112.",
+      ].join("\r\n"),
+    }).catch((error) => console.error("Emergency team notification failed:", error));
     return NextResponse.json({ emergencyId }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Emergency report could not be saved." }, { status: 500 });

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { GMAIL_TOKEN_COOKIE } from "@/lib/gmail/config";
 import { getOwnerGmailAccessToken } from "@/lib/gmail/access-token";
+import { getTeamNotificationRecipients } from "@/lib/notifications/team-email";
 
 async function encodeMessage({ to, subject, body, attachments }: { to: string; subject: string; body: string; attachments: File[] }) {
   if (!attachments.length) {
@@ -36,12 +37,11 @@ export async function POST(request: Request) {
   const token = ownerToken ?? connectedUserToken;
   if (!token) return NextResponse.json({ error: "The CivicShield Gmail sender is not configured." }, { status: 401 });
   const formData = await request.formData();
-  const configuredInbox = process.env.HACKATHON_INBOX_EMAIL || "kushalkg0000@gmail.com";
-  const to = configuredInbox;
+  const to = getTeamNotificationRecipients().join(", ");
   const subject = formData.get("subject")?.toString();
   const body = formData.get("body")?.toString();
   const attachments = formData.getAll("attachments").filter((value): value is File => value instanceof File);
-  if (!/^\S+@\S+\.\S+$/.test(to) || !subject || !body) return NextResponse.json({ error: "Provide a valid background inbox, subject, and message." }, { status: 400 });
+  if (!getTeamNotificationRecipients().length || !subject || !body) return NextResponse.json({ error: "Provide a valid team inbox, subject, and message." }, { status: 400 });
 
   const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
     method: "POST",

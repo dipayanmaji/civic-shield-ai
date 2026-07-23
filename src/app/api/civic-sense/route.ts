@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getOwnerGmailAccessToken } from "@/lib/gmail/access-token";
+import { getTeamNotificationRecipients } from "@/lib/notifications/team-email";
 import { allowRequest, rateLimitedResponse } from "@/lib/security/rate-limit";
 import { createCivicSenseSubmission, updateCivicSenseMediaUrls, uploadCivicSenseMedia } from "@/lib/supabase/civic-sense";
 import { isSupabaseConfigured } from "@/lib/supabase/server";
@@ -21,6 +22,7 @@ export async function POST(request: Request) {
     const formData = await request.formData();
     const experience = formData.get("experience")?.toString().trim() ?? "";
     const locationLabel = formData.get("locationLabel")?.toString().trim() || null;
+    const creatorMention = getInstagramMention(formData.get("instagramUsername")?.toString());
     const latitude = Number(formData.get("latitude"));
     const longitude = Number(formData.get("longitude"));
     const media = formData.getAll("media").filter((value): value is File => value instanceof File).slice(0, 2);
@@ -28,7 +30,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Add a short description or a media recording." }, { status: 400 });
     }
 
-    const ai = await generateCivicSenseCaption({ experience, locationLabel, mediaTypes: media.map((file) => file.type) });
+    const generatedAi = await generateCivicSenseCaption({ experience, locationLabel, mediaTypes: media.map((file) => file.type) });
+    const ai = {
+      ...generatedAi,
+      caption: creatorMention ? `${generatedAi.caption}\n\nCaptured by ${creatorMention}` : generatedAi.caption,
+      hashtags: normalizeHashtags(generatedAi.hashtags),
+    };
     const instagramHandle = process.env.CIVIC_SENSE_INSTAGRAM_HANDLE ?? "civicshield ai";
     const submissionId = await createCivicSenseSubmission({
       experience: experience || "Media-only Civic Sense submission.",
@@ -46,10 +53,14 @@ export async function POST(request: Request) {
     const mediaUrls = await uploadCivicSenseMedia(submissionId, media);
     if (mediaUrls.length) await updateCivicSenseMediaUrls(submissionId, mediaUrls);
 
-    const moderatorEmailId = await sendModeratorEmail({ submissionId, experience, locationLabel, latitude, longitude, ai, media });
+    const moderatorEmailId = await sendModeratorEmail({ submissionId, experience, locationLabel, latitude, longitude, ai, media }).catch((error) => {
+      console.error("Civic Sense team notification failed:", error);
+      return null;
+    });
     return NextResponse.json({ submissionId, caption: ai.caption, hashtags: ai.hashtags, instagramHandle, moderatorEmailId }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Civic Sense submission could not be saved.";
+    console.error("Civic Sense submission failed:", error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
@@ -80,7 +91,7 @@ async function generateCivicSenseCaption({ experience, locationLabel, mediaTypes
     return {
       caption: parsed.caption,
       category: parsed.category,
-      hashtags: parsed.hashtags.slice(0, 8),
+      hashtags: normalizeHashtags(parsed.hashtags),
       safetyNote: parsed.safetyNote || "Review media for privacy before posting.",
     };
   } catch {
@@ -116,8 +127,7 @@ async function sendModeratorEmail({
   media: File[];
 }) {
   const token = await getOwnerGmailAccessToken();
-  const to = process.env.CIVIC_SENSE_MODERATOR_EMAIL?.trim();
-  if (!to) throw new Error("CIVIC_SENSE_MODERATOR_EMAIL is not configured.");
+  const to = getTeamNotificationRecipients().join(", ");
   if (!token) throw new Error("Civic Sense moderator email delivery is not configured. Add a Gmail refresh token.");
   const mapLine = Number.isFinite(latitude) && Number.isFinite(longitude) ? `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}` : "Location coordinates not available";
   const body = [
@@ -153,6 +163,19 @@ async function sendModeratorEmail({
     throw new Error(result?.error?.message ?? "Gmail send failed.");
   }
   return result?.id ?? null;
+}
+
+function getInstagramMention(value: string | undefined) {
+  const username = value?.trim().replace(/^@+/, "").replace(/[^a-zA-Z0-9._]/g, "").slice(0, 30) ?? "";
+  return username ? `@${username}` : "";
+}
+
+function normalizeHashtags(values: string[]) {
+  const hashtags = values
+    .map((value) => value.trim().replace(/^#+/, "").replace(/[^a-zA-Z0-9_]/g, ""))
+    .filter(Boolean)
+    .map((value) => `#${value}`);
+  return [...new Set(hashtags)].slice(0, 8);
 }
 
 async function encodeEmail({ to, subject, body, attachments }: { to: string; subject: string; body: string; attachments: File[] }) {

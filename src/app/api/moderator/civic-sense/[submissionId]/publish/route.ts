@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
 
 import { hasModeratorSession } from "@/lib/moderator/auth";
+import { getInstagramPublishingCredentials, validateInstagramPublishingCredentials } from "@/lib/instagram/integration";
 import { getCivicSenseSubmission, markCivicSensePosted, updateCivicSenseStatus } from "@/lib/supabase/civic-sense";
 import { isSupabaseConfigured } from "@/lib/supabase/server";
+
+export const maxDuration = 60;
 
 type InstagramContainerResponse = { id?: string; error?: { message?: string } };
 type InstagramPublishResponse = { id?: string; error?: { message?: string } };
@@ -12,29 +15,34 @@ export async function POST(request: Request, { params }: { params: Promise<{ sub
   if (!hasModeratorSession(request.headers.get("cookie"))) return NextResponse.json({ error: "Moderator sign-in required." }, { status: 401 });
   if (!isSupabaseConfigured()) return NextResponse.json({ error: "Civic Sense queue is not configured." }, { status: 503 });
 
-  const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
-  const igUserId = process.env.INSTAGRAM_IG_USER_ID;
-  if (!accessToken || !igUserId) {
-    return NextResponse.json({ error: "Instagram publishing is not configured. Add INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_IG_USER_ID." }, { status: 503 });
+  const credentials = await getInstagramPublishingCredentials();
+  if (!credentials) {
+    return NextResponse.json({ error: "Instagram publishing is not connected. Connect the CivicShield Instagram account from Moderator controls." }, { status: 503 });
   }
 
   const { submissionId } = await params;
   try {
+    await validateInstagramPublishingCredentials(credentials);
     const submission = await getCivicSenseSubmission(submissionId);
     if (!submission) return NextResponse.json({ error: "Civic Sense submission was not found." }, { status: 404 });
     if (submission.status === "rejected") return NextResponse.json({ error: "Rejected submissions cannot be posted." }, { status: 400 });
 
-    const caption = [submission.aiCaption, submission.aiHashtags.join(" ")].filter(Boolean).join("\n\n");
-    const videoUrl = submission.mediaUrls.find((url, index) => submission.mediaTypes[index]?.startsWith("video/") && isPublicRemoteUrl(url));
+    const caption = [submission.aiCaption, normalizeHashtags(submission.aiHashtags).join(" ")].filter(Boolean).join("\n\n");
+    const videoIndex = submission.mediaTypes.findIndex((mediaType, index) => mediaType.startsWith("video/") && isPublicRemoteUrl(submission.mediaUrls[index] ?? ""));
+    const videoUrl = videoIndex >= 0 ? submission.mediaUrls[videoIndex] : undefined;
+    const videoType = videoIndex >= 0 ? baseMediaMimeType(submission.mediaTypes[videoIndex] ?? "") : "";
+    if (videoUrl && !isInstagramCompatibleVideo(videoType)) {
+      return NextResponse.json({ error: `This recorded video is ${videoType || "an unsupported format"}. Instagram Reels need a public MP4 or MOV video. Upload an MP4/MOV file, then approve it again.` }, { status: 422 });
+    }
     const defaultImageUrl = getDefaultImageUrl();
     const publishTarget = videoUrl ? { kind: "video" as const, url: videoUrl } : { kind: "image" as const, url: defaultImageUrl };
     if (!publishTarget.url || !isPublicRemoteUrl(publishTarget.url)) {
       return NextResponse.json({ error: "A public image/video URL is required before Instagram can publish. Configure CIVIC_SENSE_DEFAULT_IMAGE_URL or deploy NEXT_PUBLIC_SITE_URL." }, { status: 503 });
     }
 
-    const containerId = await createInstagramContainer({ accessToken, caption, igUserId, target: publishTarget });
-    if (publishTarget.kind === "video") await waitForInstagramContainer({ accessToken, containerId });
-    const instagramMediaId = await publishInstagramContainer({ accessToken, containerId, igUserId });
+    const containerId = await createInstagramContainer({ accessToken: credentials.accessToken, caption, igUserId: credentials.igUserId, target: publishTarget });
+    if (publishTarget.kind === "video") await waitForInstagramContainer({ accessToken: credentials.accessToken, containerId });
+    const instagramMediaId = await publishInstagramContainer({ accessToken: credentials.accessToken, containerId, igUserId: credentials.igUserId });
     const postUrl = submission.instagramHandle ? `https://www.instagram.com/${submission.instagramHandle.replace(/^@/, "")}/` : null;
     await markCivicSensePosted(submissionId, { instagramMediaId, instagramPostUrl: postUrl });
     return NextResponse.json({ instagramMediaId, postUrl });
@@ -62,14 +70,15 @@ async function createInstagramContainer({ accessToken, caption, igUserId, target
 
 async function waitForInstagramContainer({ accessToken, containerId }: { accessToken: string; containerId: string }) {
   const version = process.env.INSTAGRAM_API_VERSION ?? "v23.0";
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
     const response = await fetch(`https://graph.facebook.com/${version}/${containerId}?fields=status_code,status&access_token=${encodeURIComponent(accessToken)}`);
     const payload = await response.json() as InstagramStatusResponse;
     if (!response.ok) throw new Error(payload.error?.message ?? "Instagram video status check failed.");
     if (payload.status_code === "FINISHED") return;
     if (payload.status_code === "ERROR") throw new Error(payload.status ?? "Instagram could not process the video.");
   }
+  throw new Error("Instagram is still processing this Reel. Please wait a moment and try the moderator upload again.");
 }
 
 async function publishInstagramContainer({ accessToken, containerId, igUserId }: { accessToken: string; containerId: string; igUserId: string }) {
@@ -95,4 +104,19 @@ function isPublicRemoteUrl(value: string) {
   } catch {
     return false;
   }
+}
+
+function normalizeHashtags(values: string[]) {
+  return [...new Set(values
+    .map((value) => value.trim().replace(/^#+/, "").replace(/[^a-zA-Z0-9_]/g, ""))
+    .filter(Boolean)
+    .map((value) => `#${value}`))];
+}
+
+function isInstagramCompatibleVideo(mediaType: string) {
+  return ["video/mp4", "video/quicktime", "video/x-m4v"].includes(mediaType.toLowerCase());
+}
+
+function baseMediaMimeType(value: string) {
+  return value.split(";", 1)[0]?.trim().toLowerCase();
 }

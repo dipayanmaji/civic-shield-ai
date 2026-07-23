@@ -9,6 +9,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CivicSenseStatus, CivicSenseSubmission, EmergencyReport, ReportStatus, UrgencyLevel } from "@/types/report";
 
+type InstagramConnectionStatus = {
+  connected: boolean;
+  source: "oauth" | "environment" | null;
+  pageName: string | null;
+  username: string | null;
+  connectedAt: string | null;
+  lastValidatedAt: string | null;
+  lastError: string | null;
+};
+
 type ModeratorReport = {
   id: string; description: string; locationLabel: string; latitude: number | null; longitude: number | null;
   duration: string; affectedPeople: number | null; extraDetails: string | null; attachmentCount: number;
@@ -27,6 +37,7 @@ export function ModeratorWorkspace() {
   const [reports, setReports] = useState<ModeratorReport[]>([]);
   const [emergencyReports, setEmergencyReports] = useState<EmergencyReport[]>([]);
   const [civicSenseSubmissions, setCivicSenseSubmissions] = useState<CivicSenseSubmission[]>([]);
+  const [instagramConnection, setInstagramConnection] = useState<InstagramConnectionStatus | null>(null);
   const [selected, setSelected] = useState<ModeratorReport | null>(null);
   const [selectedEmergency, setSelectedEmergency] = useState<EmergencyReport | null>(null);
   const [selectedCivicSense, setSelectedCivicSense] = useState<CivicSenseSubmission | null>(null);
@@ -42,14 +53,16 @@ export function ModeratorWorkspace() {
   async function loadReports() {
     setLoading(true);
     try {
-      const [civicResponse, emergencyResponse, civicSenseResponse] = await Promise.all([
+      const [civicResponse, emergencyResponse, civicSenseResponse, instagramResponse] = await Promise.all([
         fetch("/api/moderator/reports", { cache: "no-store" }),
         fetch("/api/moderator/emergencies", { cache: "no-store" }),
         fetch("/api/moderator/civic-sense", { cache: "no-store" }),
+        fetch("/api/moderator/instagram/status", { cache: "no-store" }),
       ]);
       const civicPayload = await civicResponse.json() as { reports?: ModeratorReport[]; error?: string };
       const emergencyPayload = await emergencyResponse.json() as { reports?: EmergencyReport[]; error?: string };
       const civicSensePayload = await civicSenseResponse.json() as { submissions?: CivicSenseSubmission[]; error?: string };
+      const instagramPayload = await instagramResponse.json() as InstagramConnectionStatus;
       if (!civicResponse.ok) throw new Error(civicPayload.error ?? "Could not load civic reports.");
       if (!emergencyResponse.ok) throw new Error(emergencyPayload.error ?? "Could not load emergency reports.");
       if (!civicSenseResponse.ok) throw new Error(civicSensePayload.error ?? "Could not load civic sense posts.");
@@ -59,6 +72,7 @@ export function ModeratorWorkspace() {
       setReports(nextCivic);
       setEmergencyReports(nextEmergency);
       setCivicSenseSubmissions(nextCivicSense);
+      if (instagramResponse.ok) setInstagramConnection(instagramPayload);
       setSelected((current) => current ? nextCivic.find((report) => report.id === current.id) ?? null : null);
       setSelectedEmergency((current) => current ? nextEmergency.find((report) => report.id === current.id) ?? null : null);
       setSelectedCivicSense((current) => current ? nextCivicSense.find((submission) => submission.id === current.id) ?? null : null);
@@ -185,6 +199,7 @@ export function ModeratorWorkspace() {
             <Button size="sm" variant="outline" onClick={() => void loadReports()}><RefreshCw size={15} /> {loading ? "Loading…" : "Refresh"}</Button>
           </div>
           {activeTab === "emergency" ? <EmergencyModeration reports={emergencyReports} selected={selectedEmergency} selectedIds={emergencySelection} onDelete={(ids) => setDeleteRequest({ kind: "emergency", ids })} onSelect={setSelectedEmergency} onSelectionChange={setEmergencySelection} /> : activeTab === "civic-sense" ? <CivicSenseModeration
+            instagramConnection={instagramConnection}
             selected={selectedCivicSense}
             submissions={civicSenseSubmissions}
             onDelete={(submissionId) => void deleteCivicSenseSubmissionById(submissionId)}
@@ -210,17 +225,26 @@ function LoginCard({ accessKey, message, onChange, onLogin }: { accessKey: strin
   return <Card className="mt-6 max-w-xl rounded-3xl"><CardContent className="p-6"><div className="rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-4 text-sm leading-6 text-[#725019]"><p className="font-bold text-[#573a0c]">Internal team access only</p><p className="mt-1">This sign-in is for CivicShield moderators reviewing reports, emergency records, and social-awareness posts. Public users do not need moderator access.</p></div><p className="mt-5 text-sm leading-6 text-muted">Sign in with the server-configured moderator access key.</p><input className="mt-4 h-12 w-full rounded-xl border border-line px-3" type="password" value={accessKey} onChange={(event) => onChange(event.target.value)} placeholder="Moderator access key: 1234" /><Button className="mt-3" onClick={onLogin}>Sign in</Button>{message ? <p className="mt-4 text-sm font-semibold text-danger">{message}</p> : null}</CardContent></Card>;
 }
 
-function CivicSenseModeration({ selected, submissions, onDelete, onPublish, onSelect, onStatusChange }: { selected: CivicSenseSubmission | null; submissions: CivicSenseSubmission[]; onDelete: (submissionId: string) => void; onPublish: (submissionId: string) => Promise<{ instagramMediaId?: string; postUrl?: string | null }>; onSelect: (submission: CivicSenseSubmission) => void; onStatusChange: (submissionId: string, status: CivicSenseStatus) => void }) {
+function CivicSenseModeration({ instagramConnection, selected, submissions, onDelete, onPublish, onSelect, onStatusChange }: { instagramConnection: InstagramConnectionStatus | null; selected: CivicSenseSubmission | null; submissions: CivicSenseSubmission[]; onDelete: (submissionId: string) => void; onPublish: (submissionId: string) => Promise<{ instagramMediaId?: string; postUrl?: string | null }>; onSelect: (submission: CivicSenseSubmission) => void; onStatusChange: (submissionId: string, status: CivicSenseStatus) => void }) {
   const needsReview = submissions.filter((submission) => submission.status === "needs-review").length;
   const approved = submissions.filter((submission) => submission.status === "approved").length;
   const sorted = useMemo(() => [...submissions].sort((first, second) => new Date(second.createdAt).getTime() - new Date(first.createdAt).getTime()), [submissions]);
   return <div className="mt-6 grid gap-6 lg:grid-cols-[0.82fr_1.18fr]">
     <Card className="rounded-3xl"><CardContent className="p-5">
       <div className="grid gap-3 sm:grid-cols-3"><Metric label="Total posts" value={String(submissions.length)} /><Metric label="Needs review" value={String(needsReview)} tone="danger" /><Metric label="Approved" value={String(approved)} /></div>
+      <InstagramConnectionCard connection={instagramConnection} />
       <div className="mt-5"><p className="font-display text-xl font-bold">Civic Sense queue</p><p className="mt-1 text-sm text-muted">Newest public-awareness submissions for Instagram review.</p></div>
       <div className="mt-5 max-h-[34rem] space-y-2 overflow-y-auto pr-1">{sorted.length ? sorted.map((submission) => <article className={`rounded-2xl border p-3 transition ${selected?.id === submission.id ? "border-brand bg-brand-soft" : "border-line bg-[#fbfdfc] hover:border-brand/40"}`} key={submission.id}><button className="w-full text-left" type="button" onClick={() => onSelect(submission)}><div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold text-brand">{submission.id}</span><CivicSenseStatusBadge status={submission.status} /></div><p className="mt-2 text-sm font-bold">{submission.aiCategory || "Public civic sense"}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{submission.experience}</p><p className="mt-2 text-xs font-semibold text-muted">{submission.locationLabel || "Location not captured"} · {formatDate(submission.createdAt)}</p></button><div className="mt-3 flex justify-end"><Button size="sm" variant="danger" onClick={() => onDelete(submission.id)}><Trash2 size={14} /> Delete</Button></div></article>) : <p className="rounded-xl bg-[#fbfdfc] p-4 text-sm text-muted">No Civic Sense posts have been submitted yet.</p>}</div>
     </CardContent></Card>
     <Card className="rounded-3xl"><CardContent className="p-6 sm:p-7">{selected ? <CivicSenseDetail submission={selected} onPublish={onPublish} onStatusChange={onStatusChange} /> : <EmptyState icon={<Sparkles className="mx-auto text-brand" size={30} />} title="Select a Civic Sense post" detail="Review the citizen story, AI caption, hashtags, media summary, and posting status." />}</CardContent></Card>
+  </div>;
+}
+
+function InstagramConnectionCard({ connection }: { connection: InstagramConnectionStatus | null }) {
+  const connected = Boolean(connection?.connected);
+  const identity = connection?.username ? `@${connection.username.replace(/^@/, "")}` : connection?.pageName || "CivicShield Instagram";
+  return <div className={`mt-5 rounded-2xl border p-4 ${connected ? "border-[#cbe8dd] bg-[#effaf5]" : "border-[#ead9b8] bg-[#fffaf0]"}`}>
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="eyebrow">Instagram publishing</p><p className="mt-2 text-sm font-bold">{connected ? `Connected to ${identity}` : "Instagram is not connected"}</p><p className="mt-1 text-xs leading-5 text-muted">{connected ? `${connection?.source === "oauth" ? "Secure moderator connection" : "Legacy environment connection"}${connection?.lastValidatedAt ? ` · checked ${formatDate(connection.lastValidatedAt)}` : ""}` : "Connect the CivicShield Facebook Page and Instagram account before approving a post."}</p>{connection?.lastError ? <p className="mt-2 text-xs font-semibold text-danger">{connection.lastError}</p> : null}</div><a className={`inline-flex shrink-0 items-center rounded-xl px-3 py-2 text-xs font-bold text-white ${connected ? "bg-brand" : "bg-[#9a6317]"}`} href="/api/auth/instagram/connect">{connected ? "Reconnect" : "Connect Instagram"}</a></div>
   </div>;
 }
 
@@ -252,7 +276,7 @@ function CivicSenseDetail({ submission, onPublish, onStatusChange }: { submissio
     <div className="mt-6 flex flex-wrap gap-2 border-t border-line pt-6"><Button variant="outline" onClick={() => setReviewOpen(true)}><Sparkles size={16} /> Approve for Instagram</Button><Button onClick={() => onStatusChange(submission.id, "posted")}><CheckCircle2 size={16} /> Mark posted</Button><Button variant="danger" onClick={() => onStatusChange(submission.id, "rejected")}><Trash2 size={16} /> Reject</Button></div>
     {publishMessage ? <p className="mt-3 rounded-xl bg-brand-soft px-3 py-2 text-sm font-semibold text-brand">{publishMessage}</p> : null}
     <p className="mt-3 text-xs leading-5 text-muted">Text-only and voice-only posts use the configured CivicShield default image. Video submissions publish as Instagram Reels when the stored video URL is public.</p>
-    {reviewOpen ? <InstagramReviewDialog publishing={publishing} submission={submission} onCancel={() => setReviewOpen(false)} onProceed={() => void proceedToPublish()} /> : null}
+    {reviewOpen ? <InstagramReviewDialog message={publishMessage} publishing={publishing} submission={submission} onCancel={() => setReviewOpen(false)} onProceed={() => void proceedToPublish()} /> : null}
   </>;
 }
 
@@ -264,7 +288,7 @@ function CivicSenseMediaReview({ submission }: { submission: CivicSenseSubmissio
   })}</div></div>;
 }
 
-function InstagramReviewDialog({ publishing, submission, onCancel, onProceed }: { publishing: boolean; submission: CivicSenseSubmission; onCancel: () => void; onProceed: () => void }) {
+function InstagramReviewDialog({ message, publishing, submission, onCancel, onProceed }: { message: string; publishing: boolean; submission: CivicSenseSubmission; onCancel: () => void; onProceed: () => void }) {
   const videoIndex = submission.mediaTypes.findIndex((type) => type.startsWith("video/"));
   const hasVideo = videoIndex >= 0 && Boolean(submission.mediaUrls[videoIndex]);
   const caption = [submission.aiCaption, submission.aiHashtags.join(" ")].filter(Boolean).join("\n\n");
@@ -282,6 +306,7 @@ function InstagramReviewDialog({ publishing, submission, onCancel, onProceed }: 
           <div className="mt-5 grid gap-3 text-sm"><Info label="Location" value={submission.locationLabel || "Not captured"} /><Info label="Safety review" value={submission.aiSafetyNote || "Review media for privacy before posting."} /></div>
         </div>
       </div>
+      {message ? <p className={`mt-5 rounded-2xl border px-4 py-3 text-sm font-semibold leading-6 ${message === "Uploading to Instagram..." ? "border-[#cbe8dd] bg-brand-soft text-brand" : message.startsWith("Published successfully") ? "border-[#cbe8dd] bg-[#effaf5] text-brand" : "border-[#efc7bf] bg-[#fff8f6] text-danger"}`} role="status">{message}</p> : null}
       <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" disabled={publishing} onClick={onCancel}>Cancel</Button><Button disabled={publishing} onClick={onProceed}><Sparkles size={16} /> {publishing ? "Uploading..." : "Proceed to upload"}</Button></div>
     </CardContent></Card>
   </div>;
