@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
@@ -105,7 +106,14 @@ const nearbyLabels: Record<NearbyKind, { title: string; empty: string }> = {
   "safe-place": { title: "Safer public places", empty: "No nearby crowded public place was returned for this location." },
 };
 
+function isEmergencyKind(value: string | null): value is EmergencyKind {
+  return value === "fire" || value === "medical" || value === "electrical" || value === "accident" || value === "unsafe" || value === "women";
+}
+
 export function EmergencyAssistance() {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [selectedType, setSelectedType] = useState<EmergencyKind>("women");
   const [location, setLocation] = useState("");
   const [details, setDetails] = useState("");
@@ -116,6 +124,20 @@ export function EmergencyAssistance() {
   const [locationLabel, setLocationLabel] = useState("");
   const [nearbyPlaces, setNearbyPlaces] = useState<Record<NearbyKind, NearbyPlace[]>>({ police: [], hospital: [], ambulance: [], fire: [], "safe-place": [] });
   const [nearbyStatus, setNearbyStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+
+  useEffect(() => {
+    const requestedType = searchParams.get("type");
+    if (isEmergencyKind(requestedType)) {
+      setSelectedType(requestedType);
+    }
+  }, [searchParams]);
+
+  function selectEmergencyType(type: EmergencyKind) {
+    setSelectedType(type);
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.set("type", type);
+    router.replace(`${pathname}?${nextParams.toString()}`, { scroll: false });
+  }
 
   useEffect(() => {
     if (!navigator.geolocation) {
@@ -287,7 +309,7 @@ export function EmergencyAssistance() {
           </Card>
 
           <div className="mt-6 grid gap-6 xl:grid-cols-[0.78fr_1.22fr] xl:items-start">
-            <Card className="rounded-[1.75rem] border-[#efc7bf] bg-white shadow-surface"><CardContent className="p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-[#ffe4df] text-danger"><ActiveIcon aria-hidden={true} size={22} /></span><div><p className="eyebrow text-danger">What is happening?</p><h2 className="mt-1 font-display text-xl font-bold">Select one emergency type</h2><p className="mt-2 text-sm leading-6 text-muted">This changes the nearby help and safety guidance beside you.</p></div></div><div className="mt-5 grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-2">{emergencyTypes.map((type) => { const TypeIcon = type.icon; const active = type.id === selectedType; return <button className={`flex h-24 flex-col items-center justify-center gap-2 rounded-2xl border px-2 text-center text-sm font-bold transition ${active ? "border-danger bg-[#fff0ed] text-danger shadow-sm" : "border-[#f0d0c9] bg-[#fffaf8] text-[#4d5d59] hover:bg-white"}`} key={type.id} onClick={() => setSelectedType(type.id)} type="button"><TypeIcon aria-hidden={true} size={21} /><span>{type.label}</span></button>; })}</div></CardContent></Card>
+            <Card className="rounded-[1.75rem] border-[#efc7bf] bg-white shadow-surface"><CardContent className="p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-[#ffe4df] text-danger"><ActiveIcon aria-hidden={true} size={22} /></span><div><p className="eyebrow text-danger">What is happening?</p><h2 className="mt-1 font-display text-xl font-bold">Select one emergency type</h2><p className="mt-2 text-sm leading-6 text-muted">This changes the nearby help and safety guidance beside you.</p></div></div><div className="mt-5 grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-2">{emergencyTypes.map((type) => { const TypeIcon = type.icon; const active = type.id === selectedType; return <button className={`flex h-24 flex-col items-center justify-center gap-2 rounded-2xl border px-2 text-center text-sm font-bold transition ${active ? "border-danger bg-[#fff0ed] text-danger shadow-sm" : "border-[#f0d0c9] bg-[#fffaf8] text-[#4d5d59] hover:bg-white"}`} key={type.id} onClick={() => selectEmergencyType(type.id)} type="button"><TypeIcon aria-hidden={true} size={21} /><span>{type.label}</span></button>; })}</div></CardContent></Card>
             <div className="space-y-6"><NearbyHelpPanel activeEmergency={activeEmergency} coordinates={coordinates} nearbyPlaces={nearbyPlaces} nearbyStatus={nearbyStatus} /><Card className="rounded-[1.75rem] border-[#efc7bf] bg-white"><CardContent className="p-5 sm:p-6"><p className="eyebrow text-danger">Safety checklist</p><h2 className="mt-2 font-display text-xl font-bold">{activeEmergency.label} guidance</h2><ul className="mt-5 space-y-3">{checklist.map((step) => <li className="flex gap-3 text-sm leading-6 text-[#475854]" key={step}><CheckCircle2 aria-hidden="true" className="mt-0.5 shrink-0 text-danger" size={17} /><span>{step}</span></li>)}</ul></CardContent></Card></div>
           </div>
 

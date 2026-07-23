@@ -95,6 +95,21 @@ create table if not exists public.instagram_integrations (
   updated_at timestamptz not null default now()
 );
 
+-- Civic Sense accepts photos and short videos. The upsert updates the bucket
+-- configuration in existing projects without removing previously uploaded files.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'civic-sense-media',
+  'civic-sense-media',
+  true,
+  52428800,
+  array['image/jpeg', 'image/png', 'image/webp', 'video/webm', 'video/mp4', 'video/quicktime', 'video/x-m4v']::text[]
+)
+on conflict (id) do update set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
 alter table public.civic_sense_submissions add column if not exists media_urls text[] not null default '{}';
 alter table public.civic_sense_submissions add column if not exists instagram_media_id text;
 alter table public.civic_sense_submissions add column if not exists instagram_post_url text;

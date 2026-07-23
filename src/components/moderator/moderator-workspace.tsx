@@ -27,6 +27,7 @@ type ModeratorReport = {
 };
 type PresetRange = "all" | "7" | "14" | "30" | "custom";
 type Tab = "civic" | "emergency" | "civic-sense";
+type ModeratorNotice = { id: number; message: string; tone: "success" | "error"; actionHref?: string; actionLabel?: string };
 
 const statuses: ReportStatus[] = ["acknowledged", "assigned", "in-progress", "department-resolved", "verification-pending", "verified-resolved", "disputed", "reopened", "overdue"];
 
@@ -43,12 +44,19 @@ export function ModeratorWorkspace() {
   const [selectedCivicSense, setSelectedCivicSense] = useState<CivicSenseSubmission | null>(null);
   const [status, setStatus] = useState<ReportStatus>("acknowledged");
   const [note, setNote] = useState("");
-  const [message, setMessage] = useState("");
+  const [notices, setNotices] = useState<ModeratorNotice[]>([]);
   const [loading, setLoading] = useState(false);
   const [civicSelection, setCivicSelection] = useState<string[]>([]);
   const [emergencySelection, setEmergencySelection] = useState<string[]>([]);
-  const [deleteRequest, setDeleteRequest] = useState<{ kind: "civic" | "emergency"; ids: string[] } | null>(null);
+  const [civicSenseSelection, setCivicSenseSelection] = useState<string[]>([]);
+  const [deleteRequest, setDeleteRequest] = useState<{ kind: "civic" | "emergency" | "civic-sense"; ids: string[] } | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  function notify(message: string, tone: ModeratorNotice["tone"] = "success", action?: Pick<ModeratorNotice, "actionHref" | "actionLabel">) {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    setNotices((current) => [...current, { id, message, tone, ...action }].slice(-3));
+    window.setTimeout(() => setNotices((current) => current.filter((notice) => notice.id !== id)), 6000);
+  }
 
   async function loadReports() {
     setLoading(true);
@@ -78,21 +86,26 @@ export function ModeratorWorkspace() {
       setSelectedCivicSense((current) => current ? nextCivicSense.find((submission) => submission.id === current.id) ?? null : null);
       setCivicSelection((current) => current.filter((id) => nextCivic.some((report) => report.id === id)));
       setEmergencySelection((current) => current.filter((id) => nextEmergency.some((report) => report.id === id)));
+      setCivicSenseSelection((current) => current.filter((id) => nextCivicSense.some((submission) => submission.id === id)));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not load moderator data.");
+      notify(error instanceof Error ? error.message : "Could not load moderator data.", "error");
     } finally {
       setLoading(false);
     }
   }
 
   async function login() {
-    setMessage("");
-    const response = await fetch("/api/moderator/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accessKey }) });
-    const payload = await response.json() as { error?: string };
-    if (!response.ok) return setMessage(payload.error ?? "Could not sign in.");
-    setSignedIn(true);
-    setAccessKey("");
-    await loadReports();
+    try {
+      const response = await fetch("/api/moderator/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accessKey }) });
+      const payload = await response.json() as { error?: string };
+      if (!response.ok) return notify(payload.error ?? "Could not sign in.", "error");
+      setSignedIn(true);
+      setAccessKey("");
+      notify("Moderator sign-in successful.");
+      await loadReports();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Could not sign in.", "error");
+    }
   }
 
   async function publishStatus(ids: string[], nextStatus: ReportStatus, nextNote: string) {
@@ -105,12 +118,12 @@ export function ModeratorWorkspace() {
         const payload = await response.json() as { error?: string };
         if (!response.ok) throw new Error(payload.error ?? "Status update failed.");
       }));
-      setMessage(`${ids.length} civic report${ids.length === 1 ? "" : "s"} updated.`);
+      notify(`${ids.length} civic report${ids.length === 1 ? "" : "s"} updated.`);
       setCivicSelection([]);
       setNote("");
       await loadReports();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Status update failed.");
+      notify(error instanceof Error ? error.message : "Status update failed.", "error");
     }
   }
 
@@ -121,55 +134,51 @@ export function ModeratorWorkspace() {
       });
       const payload = await response.json() as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Civic Sense status update failed.");
-      setMessage(`Civic Sense post ${submissionId} marked ${nextStatus.replaceAll("-", " ")}.`);
+      notify(`Civic Sense post ${submissionId} marked ${nextStatus.replaceAll("-", " ")}.`);
       await loadReports();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Civic Sense status update failed.");
+      notify(error instanceof Error ? error.message : "Civic Sense status update failed.", "error");
     }
   }
 
   async function publishCivicSenseToInstagram(submissionId: string) {
     const response = await fetch(`/api/moderator/civic-sense/${encodeURIComponent(submissionId)}/publish`, { method: "POST" });
-    const payload = await response.json() as { instagramMediaId?: string; postUrl?: string | null; error?: string };
+    const payload = await response.json() as { instagramMediaId?: string; postUrl?: string | null; sourceMediaCleaned?: boolean; cleanupWarning?: string | null; error?: string };
     if (!response.ok || !payload.instagramMediaId) throw new Error(payload.error ?? "Instagram publish failed.");
-    setMessage(`Civic Sense post ${submissionId} published to Instagram.`);
+    const message = payload.sourceMediaCleaned === false
+      ? `Civic Sense post ${submissionId} is live on Instagram. Original-media cleanup needs attention.`
+      : `Civic Sense post ${submissionId} is live on Instagram. Original uploaded media was removed.`;
+    notify(message, "success", payload.postUrl ? { actionHref: payload.postUrl, actionLabel: "Open post" } : undefined);
     await loadReports();
     return payload;
-  }
-
-  async function deleteCivicSenseSubmissionById(submissionId: string) {
-    try {
-      const response = await fetch(`/api/moderator/civic-sense/${encodeURIComponent(submissionId)}`, { method: "DELETE" });
-      const payload = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(payload.error ?? "Civic Sense delete failed.");
-      setMessage(`Civic Sense post ${submissionId} deleted.`);
-      setSelectedCivicSense(null);
-      await loadReports();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Civic Sense delete failed.");
-    }
   }
 
   async function confirmDelete() {
     if (!deleteRequest) return;
     setDeleting(true);
     try {
-      const endpoint = deleteRequest.kind === "civic" ? "/api/moderator/reports" : "/api/moderator/emergencies";
+      const endpoint = deleteRequest.kind === "civic"
+        ? "/api/moderator/reports"
+        : deleteRequest.kind === "emergency"
+          ? "/api/moderator/emergencies"
+          : "/api/moderator/civic-sense";
       await Promise.all(deleteRequest.ids.map(async (reportId) => {
         const response = await fetch(`${endpoint}/${encodeURIComponent(reportId)}`, { method: "DELETE" });
         const payload = await response.json() as { error?: string };
         if (!response.ok) throw new Error(payload.error ?? "Delete failed.");
       }));
-      const label = deleteRequest.kind === "civic" ? "Civic" : "Emergency";
-      setMessage(`${label} report${deleteRequest.ids.length === 1 ? "" : "s"} deleted.`);
+      const label = deleteRequest.kind === "civic" ? "Civic" : deleteRequest.kind === "emergency" ? "Emergency" : "Zero Civic Sense";
+      notify(`${label} ${deleteRequest.kind === "civic-sense" ? "post" : "report"}${deleteRequest.ids.length === 1 ? "" : "s"} deleted.`);
       setSelected(null);
       setSelectedEmergency(null);
+      setSelectedCivicSense(null);
       setCivicSelection([]);
       setEmergencySelection([]);
+      setCivicSenseSelection([]);
       setDeleteRequest(null);
       await loadReports();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Delete failed.");
+      notify(error instanceof Error ? error.message : "Delete failed.", "error");
     } finally {
       setDeleting(false);
     }
@@ -189,22 +198,25 @@ export function ModeratorWorkspace() {
         </Link>
         <p className="eyebrow mt-6">Protected workspace</p>
         <h1 className="mt-3 flex items-center gap-2 font-display text-3xl font-bold"><ShieldCheck className="text-brand" /> Moderator controls</h1>
-        {!signedIn ? <LoginCard accessKey={accessKey} message={message} onChange={setAccessKey} onLogin={() => void login()} /> : <div className="mt-6">
+        {!signedIn ? <LoginCard accessKey={accessKey} onChange={setAccessKey} onLogin={() => void login()} /> : <div className="mt-6">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-line bg-surface p-3">
             <div className="flex flex-wrap rounded-2xl bg-[#eef6f3] p-1">
               <TabButton active={activeTab === "emergency"} onClick={() => setActiveTab("emergency")}><ShieldAlert size={16} /> Emergency reports</TabButton>
               <TabButton active={activeTab === "civic"} onClick={() => setActiveTab("civic")}><Building2 size={16} /> Civic reports</TabButton>
-              <TabButton active={activeTab === "civic-sense"} onClick={() => setActiveTab("civic-sense")}><Sparkles size={16} /> Civic Sense posts</TabButton>
+              <TabButton active={activeTab === "civic-sense"} onClick={() => setActiveTab("civic-sense")}><Sparkles size={16} /> Zero Civic Sense posts</TabButton>
             </div>
             <Button size="sm" variant="outline" onClick={() => void loadReports()}><RefreshCw size={15} /> {loading ? "Loading…" : "Refresh"}</Button>
           </div>
           {activeTab === "emergency" ? <EmergencyModeration reports={emergencyReports} selected={selectedEmergency} selectedIds={emergencySelection} onDelete={(ids) => setDeleteRequest({ kind: "emergency", ids })} onSelect={setSelectedEmergency} onSelectionChange={setEmergencySelection} /> : activeTab === "civic-sense" ? <CivicSenseModeration
             instagramConnection={instagramConnection}
             selected={selectedCivicSense}
+            selectedIds={civicSenseSelection}
             submissions={civicSenseSubmissions}
-            onDelete={(submissionId) => void deleteCivicSenseSubmissionById(submissionId)}
+            onDelete={(ids) => setDeleteRequest({ kind: "civic-sense", ids })}
             onSelect={setSelectedCivicSense}
+            onSelectionChange={setCivicSenseSelection}
             onPublish={(submissionId) => publishCivicSenseToInstagram(submissionId)}
+            onNotice={notify}
             onStatusChange={(submissionId, nextStatus) => void updateCivicSenseSubmissionStatus(submissionId, nextStatus)}
           /> : <CivicModeration
             reports={reports} selected={selected} selectedIds={civicSelection} status={status} note={note}
@@ -213,30 +225,39 @@ export function ModeratorWorkspace() {
             onStatusChange={setStatus} onUpdate={() => void publishStatus(selected ? [selected.id] : [], status, note)}
             onBulkUpdate={(nextStatus, nextNote) => void publishStatus(civicSelection, nextStatus, nextNote)}
           />}
-          {message ? <p className="mt-5 rounded-xl bg-brand-soft px-3 py-2 text-sm font-semibold text-brand" role="status">{message}</p> : null}
         </div>}
       </div>
     </main>
     {deleteRequest ? <DeleteDialog kind={deleteRequest.kind} reportCount={deleteRequest.ids.length} deleting={deleting} onCancel={() => setDeleteRequest(null)} onDelete={() => void confirmDelete()} /> : null}
+    <ModeratorNoticeViewport notices={notices} onDismiss={(id) => setNotices((current) => current.filter((notice) => notice.id !== id))} />
   </>;
 }
 
-function LoginCard({ accessKey, message, onChange, onLogin }: { accessKey: string; message: string; onChange: (value: string) => void; onLogin: () => void }) {
-  return <Card className="mt-6 max-w-xl rounded-3xl"><CardContent className="p-6"><div className="rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-4 text-sm leading-6 text-[#725019]"><p className="font-bold text-[#573a0c]">Internal team access only</p><p className="mt-1">This sign-in is for CivicShield moderators reviewing reports, emergency records, and social-awareness posts. Public users do not need moderator access.</p></div><p className="mt-5 text-sm leading-6 text-muted">Sign in with the server-configured moderator access key.</p><input className="mt-4 h-12 w-full rounded-xl border border-line px-3" type="password" value={accessKey} onChange={(event) => onChange(event.target.value)} placeholder="Moderator access key: 1234" /><Button className="mt-3" onClick={onLogin}>Sign in</Button>{message ? <p className="mt-4 text-sm font-semibold text-danger">{message}</p> : null}</CardContent></Card>;
+function LoginCard({ accessKey, onChange, onLogin }: { accessKey: string; onChange: (value: string) => void; onLogin: () => void }) {
+  return <Card className="mt-6 max-w-xl rounded-3xl"><CardContent className="p-6"><div className="rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-4 text-sm leading-6 text-[#725019]"><p className="font-bold text-[#573a0c]">Internal team access only</p><p className="mt-1">This sign-in is for CivicShield moderators reviewing reports, emergency records, and social-awareness posts. Public users do not need moderator access.</p></div><p className="mt-5 text-sm leading-6 text-muted">Sign in with the server-configured moderator access key.</p><input className="mt-4 h-12 w-full rounded-xl border border-line px-3" type="password" value={accessKey} onChange={(event) => onChange(event.target.value)} placeholder="Moderator access key: 1234" /><Button className="mt-3" onClick={onLogin}>Sign in</Button></CardContent></Card>;
 }
 
-function CivicSenseModeration({ instagramConnection, selected, submissions, onDelete, onPublish, onSelect, onStatusChange }: { instagramConnection: InstagramConnectionStatus | null; selected: CivicSenseSubmission | null; submissions: CivicSenseSubmission[]; onDelete: (submissionId: string) => void; onPublish: (submissionId: string) => Promise<{ instagramMediaId?: string; postUrl?: string | null }>; onSelect: (submission: CivicSenseSubmission) => void; onStatusChange: (submissionId: string, status: CivicSenseStatus) => void }) {
+function CivicSenseModeration({ instagramConnection, selected, selectedIds, submissions, onDelete, onNotice, onPublish, onSelect, onSelectionChange, onStatusChange }: { instagramConnection: InstagramConnectionStatus | null; selected: CivicSenseSubmission | null; selectedIds: string[]; submissions: CivicSenseSubmission[]; onDelete: (ids: string[]) => void; onNotice: (message: string, tone?: ModeratorNotice["tone"]) => void; onPublish: (submissionId: string) => Promise<{ instagramMediaId?: string; postUrl?: string | null }>; onSelect: (submission: CivicSenseSubmission) => void; onSelectionChange: (ids: string[]) => void; onStatusChange: (submissionId: string, status: CivicSenseStatus) => void }) {
+  const [statusFilter, setStatusFilter] = useState<"all" | "needs-review" | "approved">("all");
   const needsReview = submissions.filter((submission) => submission.status === "needs-review").length;
   const approved = submissions.filter((submission) => submission.status === "approved").length;
-  const sorted = useMemo(() => [...submissions].sort((first, second) => new Date(second.createdAt).getTime() - new Date(first.createdAt).getTime()), [submissions]);
+  const sorted = useMemo(() => submissions
+    .filter((submission) => statusFilter === "all" || submission.status === statusFilter)
+    .sort((first, second) => new Date(second.createdAt).getTime() - new Date(first.createdAt).getTime()), [statusFilter, submissions]);
+  const toggleStatusFilter = (nextFilter: "all" | "needs-review" | "approved") => setStatusFilter((current) => current === nextFilter ? "all" : nextFilter);
+  const allVisibleSelected = sorted.length > 0 && sorted.every((submission) => selectedIds.includes(submission.id));
+  function toggleSelection(id: string) { onSelectionChange(selectedIds.includes(id) ? selectedIds.filter((item) => item !== id) : [...selectedIds, id]); }
+  function toggleVisibleSelection() { onSelectionChange(allVisibleSelected ? selectedIds.filter((id) => !sorted.some((submission) => submission.id === id)) : [...new Set([...selectedIds, ...sorted.map((submission) => submission.id)])]); }
   return <div className="mt-6 grid gap-6 lg:grid-cols-[0.82fr_1.18fr]">
     <Card className="rounded-3xl"><CardContent className="p-5">
-      <div className="grid gap-3 sm:grid-cols-3"><Metric label="Total posts" value={String(submissions.length)} /><Metric label="Needs review" value={String(needsReview)} tone="danger" /><Metric label="Approved" value={String(approved)} /></div>
+      <div className="grid gap-3 sm:grid-cols-3"><Metric active={statusFilter === "all"} label="Total posts" onClick={() => toggleStatusFilter("all")} value={String(submissions.length)} /><Metric active={statusFilter === "needs-review"} label="Needs review" onClick={() => toggleStatusFilter("needs-review")} value={String(needsReview)} tone="danger" /><Metric active={statusFilter === "approved"} label="Approved" onClick={() => toggleStatusFilter("approved")} value={String(approved)} /></div>
       <InstagramConnectionCard connection={instagramConnection} />
-      <div className="mt-5"><p className="font-display text-xl font-bold">Civic Sense queue</p><p className="mt-1 text-sm text-muted">Newest public-awareness submissions for Instagram review.</p></div>
-      <div className="mt-5 max-h-[34rem] space-y-2 overflow-y-auto pr-1">{sorted.length ? sorted.map((submission) => <article className={`rounded-2xl border p-3 transition ${selected?.id === submission.id ? "border-brand bg-brand-soft" : "border-line bg-[#fbfdfc] hover:border-brand/40"}`} key={submission.id}><button className="w-full text-left" type="button" onClick={() => onSelect(submission)}><div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold text-brand">{submission.id}</span><CivicSenseStatusBadge status={submission.status} /></div><p className="mt-2 text-sm font-bold">{submission.aiCategory || "Public civic sense"}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{submission.experience}</p><p className="mt-2 text-xs font-semibold text-muted">{submission.locationLabel || "Location not captured"} · {formatDate(submission.createdAt)}</p></button><div className="mt-3 flex justify-end"><Button size="sm" variant="danger" onClick={() => onDelete(submission.id)}><Trash2 size={14} /> Delete</Button></div></article>) : <p className="rounded-xl bg-[#fbfdfc] p-4 text-sm text-muted">No Civic Sense posts have been submitted yet.</p>}</div>
+      <div className="mt-5"><p className="font-display text-xl font-bold">Zero Civic Sense queue</p><p className="mt-1 text-sm text-muted">{statusFilter === "all" ? "Newest public-awareness submissions for Instagram review." : `${sorted.length} ${statusFilter === "needs-review" ? "post needs review" : "approved post"}${sorted.length === 1 ? "" : "s"} shown. Click the active summary card again to clear the filter.`}</p></div>
+      {selectedIds.length ? <div className="mt-4 rounded-2xl border border-[#efc7bf] bg-[#fff8f6] p-3"><p className="text-sm font-bold text-danger">{selectedIds.length} Zero Civic Sense post{selectedIds.length === 1 ? "" : "s"} selected</p><div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="danger" onClick={() => onDelete(selectedIds)}><Trash2 size={14} /> Delete selected</Button><button className="text-xs font-bold text-danger underline underline-offset-4" type="button" onClick={() => onSelectionChange([])}>Clear selection</button></div></div> : null}
+      <div className="mt-5 flex items-center justify-between gap-3"><label className="flex items-center gap-2 text-xs font-bold text-muted"><input className="size-4 accent-[#076b5a]" type="checkbox" checked={allVisibleSelected} onChange={toggleVisibleSelection} /> Select filtered</label></div>
+      <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">{sorted.length ? sorted.map((submission) => <article className={`flex gap-3 rounded-2xl border p-3 transition ${selected?.id === submission.id ? "border-brand bg-brand-soft" : "border-line bg-[#fbfdfc] hover:border-brand/40"}`} key={submission.id}><input aria-label={`Select ${submission.id}`} className="mt-1 size-4 shrink-0 accent-[#076b5a]" type="checkbox" checked={selectedIds.includes(submission.id)} onChange={() => toggleSelection(submission.id)} /><div className="min-w-0 flex-1"><button className="w-full text-left" type="button" onClick={() => onSelect(submission)}><div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold text-brand">{submission.id}</span><CivicSenseStatusBadge status={submission.status} /></div><p className="mt-2 text-sm font-bold">{submission.aiCategory || "Public civic sense"}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{submission.experience}</p><p className="mt-2 text-xs font-semibold text-muted">{submission.locationLabel || "Location not captured"} · {formatDate(submission.createdAt)}</p></button><div className="mt-3 flex justify-end"><Button size="sm" variant="danger" onClick={() => onDelete([submission.id])}><Trash2 size={14} /> Delete</Button></div></div></article>) : <p className="rounded-xl bg-[#fbfdfc] p-4 text-sm text-muted">No Zero Civic Sense posts match this summary filter.</p>}</div>
     </CardContent></Card>
-    <Card className="rounded-3xl"><CardContent className="p-6 sm:p-7">{selected ? <CivicSenseDetail submission={selected} onPublish={onPublish} onStatusChange={onStatusChange} /> : <EmptyState icon={<Sparkles className="mx-auto text-brand" size={30} />} title="Select a Civic Sense post" detail="Review the citizen story, AI caption, hashtags, media summary, and posting status." />}</CardContent></Card>
+    <Card className="rounded-3xl"><CardContent className="p-6 sm:p-7">{selected ? <CivicSenseDetail submission={selected} onNotice={onNotice} onPublish={onPublish} onStatusChange={onStatusChange} /> : <EmptyState icon={<Sparkles className="mx-auto text-brand" size={30} />} title="Select a Civic Sense post" detail="Review the citizen story, AI caption, hashtags, media summary, and posting status." />}</CardContent></Card>
   </div>;
 }
 
@@ -248,8 +269,12 @@ function InstagramConnectionCard({ connection }: { connection: InstagramConnecti
   </div>;
 }
 
-function CivicSenseDetail({ submission, onPublish, onStatusChange }: { submission: CivicSenseSubmission; onPublish: (submissionId: string) => Promise<{ instagramMediaId?: string; postUrl?: string | null }>; onStatusChange: (submissionId: string, status: CivicSenseStatus) => void }) {
+function CivicSenseDetail({ submission, onNotice, onPublish, onStatusChange }: { submission: CivicSenseSubmission; onNotice: (message: string, tone?: ModeratorNotice["tone"]) => void; onPublish: (submissionId: string) => Promise<{ instagramMediaId?: string; postUrl?: string | null }>; onStatusChange: (submissionId: string, status: CivicSenseStatus) => void }) {
   const mapsUrl = mapsLink(submission.latitude, submission.longitude);
+  const hasPublishableMedia = submission.mediaUrls.some((url, index) => {
+    const type = submission.mediaTypes[index] ?? "";
+    return Boolean(url) && (type.startsWith("video/") || type.startsWith("image/"));
+  });
   const [reviewOpen, setReviewOpen] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [publishMessage, setPublishMessage] = useState("");
@@ -261,7 +286,9 @@ function CivicSenseDetail({ submission, onPublish, onStatusChange }: { submissio
       setPublishMessage(`Published successfully. Instagram media ID: ${result.instagramMediaId}`);
       setReviewOpen(false);
     } catch (error) {
-      setPublishMessage(error instanceof Error ? error.message : "Instagram publish failed.");
+      const errorMessage = error instanceof Error ? error.message : "Instagram publish failed.";
+      setPublishMessage(errorMessage);
+      onNotice(errorMessage, "error");
     } finally {
       setPublishing(false);
     }
@@ -273,32 +300,41 @@ function CivicSenseDetail({ submission, onPublish, onStatusChange }: { submissio
     {mapsUrl ? <MapLink href={mapsUrl} label="Open submission location" /> : null}
     <CivicSenseMediaReview submission={submission} />
     <div className="mt-6 rounded-2xl border border-[#cbe8dd] bg-[#effaf5] p-4"><p className="eyebrow">AI generated caption</p><p className="mt-3 text-sm leading-7">{submission.aiCaption}</p><div className="mt-4 flex flex-wrap gap-2">{submission.aiHashtags.map((tag) => <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-brand" key={tag}>{tag}</span>)}</div></div>
-    <div className="mt-6 flex flex-wrap gap-2 border-t border-line pt-6"><Button variant="outline" onClick={() => setReviewOpen(true)}><Sparkles size={16} /> Approve for Instagram</Button><Button onClick={() => onStatusChange(submission.id, "posted")}><CheckCircle2 size={16} /> Mark posted</Button><Button variant="danger" onClick={() => onStatusChange(submission.id, "rejected")}><Trash2 size={16} /> Reject</Button></div>
-    {publishMessage ? <p className="mt-3 rounded-xl bg-brand-soft px-3 py-2 text-sm font-semibold text-brand">{publishMessage}</p> : null}
-    <p className="mt-3 text-xs leading-5 text-muted">Text-only and voice-only posts use the configured CivicShield default image. Video submissions publish as Instagram Reels when the stored video URL is public.</p>
+    <div className="mt-6 flex flex-wrap gap-2 border-t border-line pt-6"><Button variant="outline" disabled={!hasPublishableMedia} onClick={() => { setPublishMessage(""); setReviewOpen(true); }}><Sparkles size={16} /> Approve for Instagram</Button><Button onClick={() => onStatusChange(submission.id, "posted")}><CheckCircle2 size={16} /> Mark posted</Button><Button variant="danger" onClick={() => onStatusChange(submission.id, "rejected")}><Trash2 size={16} /> Reject</Button></div>
+    <p className="mt-3 text-xs leading-5 text-muted">Every Civic Sense post needs a photo or video. One video publishes as a Reel, one photo publishes as an image post, and two uploaded files publish together as one Instagram carousel. Submissions without stored media cannot be published.</p>
     {reviewOpen ? <InstagramReviewDialog message={publishMessage} publishing={publishing} submission={submission} onCancel={() => setReviewOpen(false)} onProceed={() => void proceedToPublish()} /> : null}
   </>;
 }
 
 function CivicSenseMediaReview({ submission }: { submission: CivicSenseSubmission }) {
-  if (!submission.mediaUrls.length) return <div className="mt-6 rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-4 text-sm leading-6 text-[#725019]"><p className="font-bold">Post media</p><p className="mt-1">No media was stored for this submission. Instagram publishing will use the configured CivicShield default image with the generated caption.</p></div>;
+  if (!submission.mediaUrls.length) {
+    if (submission.status === "posted") return <div className="mt-6 rounded-2xl border border-[#cbe8dd] bg-[#effaf5] p-4 text-sm leading-6 text-brand"><p className="font-bold">Source media removed</p><p className="mt-1">This post is live on Instagram. CivicShield kept its review record and Instagram reference, then removed the original uploaded media from storage.</p></div>;
+    return <div className="mt-6 rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-4 text-sm leading-6 text-[#725019]"><p className="font-bold">Post media</p><p className="mt-1">No uploaded photo or video is attached. This submission cannot be published to Instagram; reject it or ask for a new submission with media.</p></div>;
+  }
   return <div className="mt-6 rounded-2xl border border-line bg-[#fbfdfc] p-4"><p className="eyebrow">Stored media preview</p><div className="mt-3 grid gap-3 sm:grid-cols-2">{submission.mediaUrls.map((url, index) => {
     const type = submission.mediaTypes[index] ?? "";
-    return <div className="rounded-2xl border border-line bg-white p-3" key={`${url}-${index}`}><p className="mb-2 truncate text-xs font-bold text-muted">{type || "media file"}</p>{type.startsWith("video/") ? <video className="aspect-video w-full rounded-xl bg-[#101a18] object-cover" controls src={url} /> : type.startsWith("audio/") ? <audio className="w-full" controls src={url} /> : <a className="text-sm font-bold text-brand underline underline-offset-4" href={url} target="_blank" rel="noreferrer">Open media</a>}</div>;
+    return <div className="rounded-2xl border border-line bg-white p-3" key={`${url}-${index}`}><p className="mb-2 truncate text-xs font-bold text-muted">{type || "media file"}</p>{type.startsWith("video/") ? <video className="aspect-video w-full rounded-xl bg-[#101a18] object-cover" controls src={url} /> : type.startsWith("image/") ? <img className="aspect-video w-full rounded-xl object-cover" src={url} alt="Civic Sense submission evidence" /> : <a className="text-sm font-bold text-brand underline underline-offset-4" href={url} target="_blank" rel="noreferrer">Open media</a>}</div>;
   })}</div></div>;
 }
 
 function InstagramReviewDialog({ message, publishing, submission, onCancel, onProceed }: { message: string; publishing: boolean; submission: CivicSenseSubmission; onCancel: () => void; onProceed: () => void }) {
-  const videoIndex = submission.mediaTypes.findIndex((type) => type.startsWith("video/"));
-  const hasVideo = videoIndex >= 0 && Boolean(submission.mediaUrls[videoIndex]);
+  const media = submission.mediaUrls.map((url, index) => ({ url, type: submission.mediaTypes[index] ?? "" })).filter(({ url, type }) => Boolean(url) && (type.startsWith("video/") || type.startsWith("image/")));
+  const hasPublishableMedia = media.length > 0;
+  const publishSummary = media.length > 1
+    ? `Both uploaded files will publish together as one Instagram carousel post.`
+    : media[0]?.type.startsWith("video/")
+      ? "This will publish the stored vertical video as a Reel."
+      : media[0]?.type.startsWith("image/")
+        ? "This will publish the stored photo as an Instagram image post."
+        : "A photo or video is required before this submission can be published.";
   const caption = [submission.aiCaption, submission.aiHashtags.join(" ")].filter(Boolean).join("\n\n");
   return <div className="fixed inset-0 z-50 grid place-items-center bg-[#132421]/60 p-5" role="dialog" aria-modal="true" aria-labelledby="instagram-review-title">
     <Card className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-3xl shadow-surface"><CardContent className="p-6 sm:p-7">
-      <div className="flex items-start justify-between gap-4"><div><p className="eyebrow">Final Instagram review</p><h2 className="mt-2 font-display text-2xl font-bold" id="instagram-review-title">Approve and upload {submission.id}</h2><p className="mt-2 text-sm leading-6 text-muted">{hasVideo ? "This will publish the stored video as a Reel." : "This will publish the configured CivicShield default image with the generated caption."}</p></div><button className="grid size-10 place-items-center rounded-xl border border-line" type="button" onClick={onCancel} aria-label="Close Instagram review"><X size={18} /></button></div>
+      <div className="flex items-start justify-between gap-4"><div><p className="eyebrow">Final Instagram review</p><h2 className="mt-2 font-display text-2xl font-bold" id="instagram-review-title">Approve and upload {submission.id}</h2><p className="mt-2 text-sm leading-6 text-muted">{publishSummary}</p></div><button className="grid size-10 place-items-center rounded-xl border border-line" type="button" onClick={onCancel} aria-label="Close Instagram review"><X size={18} /></button></div>
       <div className="mt-6 grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
         <div className="rounded-3xl border border-line bg-[#fbfdfc] p-4">
           <p className="text-xs font-bold uppercase tracking-[0.1em] text-muted">Media to publish</p>
-          {hasVideo ? <video className="mt-3 aspect-[9/16] max-h-[28rem] w-full rounded-2xl bg-[#101a18] object-cover" controls src={submission.mediaUrls[videoIndex]} /> : <div className="mt-3 grid aspect-square place-items-center rounded-2xl border border-[#cbe8dd] bg-[#effaf5] p-6 text-center"><div><Sparkles className="mx-auto text-brand" size={34} /><p className="mt-4 font-display text-2xl font-bold">CivicShield AI</p><p className="mt-2 text-sm text-muted">{submission.aiCategory || "Civic awareness"}</p></div></div>}
+          {media.length ? <div className="mt-3 grid gap-3 sm:grid-cols-2">{media.map(({ url, type }, index) => type.startsWith("video/") ? <video className="aspect-[9/16] max-h-[28rem] w-full rounded-2xl bg-[#101a18] object-cover" controls key={`${url}-${index}`} src={url} /> : <img className="aspect-square max-h-[28rem] w-full rounded-2xl object-cover" key={`${url}-${index}`} src={url} alt={`Civic Sense photo ${index + 1}`} />)}</div> : <div className="mt-3 grid aspect-square place-items-center rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-6 text-center text-sm font-semibold text-[#725019]">A photo or video is required to publish this submission.</div>}
         </div>
         <div className="rounded-3xl border border-[#cbe8dd] bg-[#effaf5] p-4">
           <p className="text-xs font-bold uppercase tracking-[0.1em] text-brand">Caption</p>
@@ -306,24 +342,32 @@ function InstagramReviewDialog({ message, publishing, submission, onCancel, onPr
           <div className="mt-5 grid gap-3 text-sm"><Info label="Location" value={submission.locationLabel || "Not captured"} /><Info label="Safety review" value={submission.aiSafetyNote || "Review media for privacy before posting."} /></div>
         </div>
       </div>
-      {message ? <p className={`mt-5 rounded-2xl border px-4 py-3 text-sm font-semibold leading-6 ${message === "Uploading to Instagram..." ? "border-[#cbe8dd] bg-brand-soft text-brand" : message.startsWith("Published successfully") ? "border-[#cbe8dd] bg-[#effaf5] text-brand" : "border-[#efc7bf] bg-[#fff8f6] text-danger"}`} role="status">{message}</p> : null}
-      <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" disabled={publishing} onClick={onCancel}>Cancel</Button><Button disabled={publishing} onClick={onProceed}><Sparkles size={16} /> {publishing ? "Uploading..." : "Proceed to upload"}</Button></div>
+      {message === "Uploading to Instagram..." ? <p className="mt-5 rounded-2xl border border-[#cbe8dd] bg-brand-soft px-4 py-3 text-sm font-semibold leading-6 text-brand" role="status">Uploading to Instagram…</p> : null}
+      <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" disabled={publishing} onClick={onCancel}>Cancel</Button><Button disabled={publishing || !hasPublishableMedia} onClick={onProceed}><Sparkles size={16} /> {publishing ? "Uploading..." : "Proceed to upload"}</Button></div>
     </CardContent></Card>
   </div>;
 }
 
 function EmergencyModeration({ reports, selected, selectedIds, onDelete, onSelect, onSelectionChange }: { reports: EmergencyReport[]; selected: EmergencyReport | null; selectedIds: string[]; onDelete: (ids: string[]) => void; onSelect: (report: EmergencyReport) => void; onSelectionChange: (ids: string[]) => void }) {
   const [city, setCity] = useState("all");
+  const [summaryFilter, setSummaryFilter] = useState<"all" | "women" | "unsafe">("all");
   const cities = useMemo(() => citiesFor(reports), [reports]);
-  const filtered = useMemo(() => reports.filter((report) => city === "all" || cityForLocation(report.locationLabel) === city), [city, reports]);
+  const filtered = useMemo(() => reports.filter((report) => {
+    if (city !== "all" && cityForLocation(report.locationLabel) !== city) return false;
+    if (summaryFilter === "women") return report.type.toLowerCase().includes("women");
+    if (summaryFilter === "unsafe") return !report.isSafe;
+    return true;
+  }), [city, reports, summaryFilter]);
   const womenReports = reports.filter((report) => report.type.toLowerCase().includes("women")).length;
+  const unsafeReports = reports.filter((report) => !report.isSafe).length;
   const allFilteredSelected = filtered.length > 0 && filtered.every((report) => selectedIds.includes(report.id));
+  const toggleSummaryFilter = (nextFilter: "all" | "women" | "unsafe") => setSummaryFilter((current) => current === nextFilter ? "all" : nextFilter);
   function toggle(id: string) { onSelectionChange(selectedIds.includes(id) ? selectedIds.filter((item) => item !== id) : [...selectedIds, id]); }
   function toggleAll() { onSelectionChange(allFilteredSelected ? selectedIds.filter((id) => !filtered.some((report) => report.id === id)) : [...new Set([...selectedIds, ...filtered.map((report) => report.id)])]); }
   return <div className="mt-6 grid gap-6 lg:grid-cols-[0.88fr_1.12fr]">
     <Card className="rounded-3xl"><CardContent className="p-5">
-      <div className="grid gap-3 sm:grid-cols-3"><Metric label="Total emergencies" value={String(reports.length)} /><Metric label="Women safety" value={String(womenReports)} tone="women" /><Metric label="Not marked safe" value={String(reports.filter((report) => !report.isSafe).length)} tone="danger" /></div>
-      <div className="mt-5 flex flex-wrap items-end justify-between gap-3"><div><p className="font-display text-xl font-bold">Lodged emergency reports</p><p className="mt-1 text-sm text-muted">Newest first · {filtered.length} shown</p></div><CitySelect cities={cities} value={city} onChange={setCity} /></div>
+      <div className="grid gap-3 sm:grid-cols-3"><Metric active={summaryFilter === "all"} label="Total emergencies" onClick={() => toggleSummaryFilter("all")} value={String(reports.length)} /><Metric active={summaryFilter === "women"} label="Women safety" onClick={() => toggleSummaryFilter("women")} value={String(womenReports)} tone="women" /><Metric active={summaryFilter === "unsafe"} label="Not marked safe" onClick={() => toggleSummaryFilter("unsafe")} value={String(unsafeReports)} tone="danger" /></div>
+      <div className="mt-5 flex flex-wrap items-end justify-between gap-3"><div><p className="font-display text-xl font-bold">Lodged emergency reports</p><p className="mt-1 text-sm text-muted">Newest first · {filtered.length} shown{summaryFilter !== "all" ? ". Click the active summary card again to clear the filter." : ""}</p></div><CitySelect cities={cities} value={city} onChange={setCity} /></div>
       {selectedIds.length ? <div className="mt-4 rounded-2xl border border-[#efc7bf] bg-[#fff8f6] p-3"><p className="text-sm font-bold text-danger">{selectedIds.length} emergency report{selectedIds.length === 1 ? "" : "s"} selected</p><div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="danger" onClick={() => onDelete(selectedIds)}><Trash2 size={14} /> Delete selected</Button><button className="text-xs font-bold text-danger underline underline-offset-4" type="button" onClick={() => onSelectionChange([])}>Clear selection</button></div></div> : null}
       <div className="mt-5 flex items-center justify-between gap-3"><label className="flex items-center gap-2 text-xs font-bold text-muted"><input className="size-4 accent-[#c73c31]" type="checkbox" checked={allFilteredSelected} onChange={toggleAll} /> Select filtered</label></div>
       <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">{filtered.length ? filtered.map((report) => <article className={`flex gap-3 rounded-2xl border p-3 transition ${selected?.id === report.id ? "border-danger bg-[#fff4f1]" : "border-line bg-[#fbfdfc] hover:border-danger/40"}`} key={report.id}><input aria-label={`Select ${report.id}`} className="mt-1 size-4 shrink-0 accent-[#c73c31]" type="checkbox" checked={selectedIds.includes(report.id)} onChange={() => toggle(report.id)} /><button className="min-w-0 flex-1 text-left" type="button" onClick={() => onSelect(report)}><div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold text-danger">{report.id}</span><Badge tone={report.isSafe ? "safe" : "urgent"}>{report.isSafe ? "safe now" : "needs review"}</Badge></div><p className="mt-2 flex items-center gap-1.5 text-sm font-bold">{report.type.toLowerCase().includes("women") ? <Venus size={15} className="text-[#a22a58]" /> : <ShieldAlert size={15} className="text-danger" />}{report.type}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{report.locationLabel}</p><p className="mt-2 text-xs font-semibold text-muted">{formatDate(report.createdAt)}</p></button></article>) : <p className="rounded-xl bg-[#fbfdfc] p-4 text-sm text-muted">No emergency reports match this city.</p>}</div>
@@ -387,14 +431,32 @@ function DateRangePicker({ fromDate, toDate, onChange }: { fromDate: string; toD
   return <div className="relative mt-2"><button className="flex h-10 w-full items-center justify-between rounded-lg border border-line bg-white px-3 text-left text-sm font-semibold" type="button" onClick={() => setOpen((value) => !value)}><span className="flex items-center gap-2"><CalendarDays className="text-brand" size={16} />{fromDate ? `${displayDate(fromDate)}${toDate ? ` — ${displayDate(toDate)}` : " — choose end date"}` : "Choose date range"}</span><span className="text-xs text-muted">Calendar</span></button>{open ? <div className="absolute left-0 top-full z-30 mt-2 w-[22rem] max-w-[calc(100vw-4rem)] rounded-2xl border border-line bg-white p-4 shadow-surface"><div className="flex items-center justify-between"><button className="grid size-9 place-items-center rounded-lg border border-line" type="button" onClick={() => setMonth(addMonths(month, -1))}><ChevronLeft size={17} /></button><p className="font-display text-sm font-bold">{month.toLocaleDateString("en-IN", { month: "long", year: "numeric" })}</p><button className="grid size-9 place-items-center rounded-lg border border-line disabled:opacity-30" disabled={startOfMonth(month) >= startOfMonth(today)} type="button" onClick={() => setMonth(addMonths(month, 1))}><ChevronRight size={17} /></button></div><p className="mt-2 text-xs text-muted">Choose start and end dates. Future dates are disabled.</p><div className="mt-3 grid grid-cols-7 gap-1 text-center text-[0.68rem] font-bold text-muted">{"SMTWTFS".split("").map((day, index) => <span key={`${day}-${index}`}>{day}</span>)}</div><div className="mt-2 grid grid-cols-7 gap-1">{monthDays(month).map((day, index) => { if (!day) return <span key={`blank-${index}`} className="aspect-square" />; const disabled = day > today; const selected = Boolean((from && sameDate(day, from)) || (to && sameDate(day, to))); const between = Boolean(from && to && day > from && day < to); return <button className={`aspect-square rounded-lg text-sm font-bold ${selected ? "bg-brand text-white" : disabled ? "cursor-not-allowed text-[#b8c2bf]" : between ? "bg-brand-soft text-brand" : "bg-[#fbfdfc] hover:bg-brand-soft"}`} disabled={disabled} key={dateKey(day)} type="button" onClick={() => select(day)}>{day.getDate()}</button>; })}</div><button className="mt-3 text-xs font-bold text-brand underline underline-offset-4" type="button" onClick={() => onChange({ fromDate: "", toDate: "" })}>Clear date range</button></div> : null}</div>;
 }
 
-function DeleteDialog({ kind, reportCount, deleting, onCancel, onDelete }: { kind: "civic" | "emergency"; reportCount: number; deleting: boolean; onCancel: () => void; onDelete: () => void }) {
-  const label = `${reportCount} ${kind} report${reportCount === 1 ? "" : "s"}`;
-  return <div className="fixed inset-0 z-50 grid place-items-center bg-[#132421]/55 p-5" role="dialog" aria-modal="true" aria-labelledby="delete-title"><Card className="w-full max-w-lg rounded-3xl shadow-surface"><CardContent className="p-6 sm:p-7"><span className="grid size-11 place-items-center rounded-2xl bg-[#fff1ef] text-danger"><Trash2 size={21} /></span><p className="eyebrow mt-5 text-danger">Permanent action</p><h2 className="mt-2 font-display text-2xl font-bold" id="delete-title">Delete {label}?</h2><p className="mt-3 text-sm leading-6 text-muted">This permanently removes {label}, including any related public timeline data. This cannot be undone.</p><div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" disabled={deleting} onClick={onCancel}>Keep reports</Button><Button variant="danger" disabled={deleting} onClick={onDelete}><Trash2 size={16} /> {deleting ? "Deleting…" : "Delete permanently"}</Button></div></CardContent></Card></div>;
+function DeleteDialog({ kind, reportCount, deleting, onCancel, onDelete }: { kind: "civic" | "emergency" | "civic-sense"; reportCount: number; deleting: boolean; onCancel: () => void; onDelete: () => void }) {
+  const itemName = kind === "civic-sense" ? "Zero Civic Sense post" : `${kind} report`;
+  const label = `${reportCount} ${itemName}${reportCount === 1 ? "" : "s"}`;
+  const description = kind === "civic-sense"
+    ? "This permanently removes the selected submission records and their uploaded media from storage. This cannot be undone."
+    : `This permanently removes ${label}, including any related public timeline data. This cannot be undone.`;
+  return <div className="fixed inset-0 z-50 grid place-items-center bg-[#132421]/55 p-5" role="dialog" aria-modal="true" aria-labelledby="delete-title"><Card className="w-full max-w-lg rounded-3xl shadow-surface"><CardContent className="p-6 sm:p-7"><span className="grid size-11 place-items-center rounded-2xl bg-[#fff1ef] text-danger"><Trash2 size={21} /></span><p className="eyebrow mt-5 text-danger">Permanent action</p><h2 className="mt-2 font-display text-2xl font-bold" id="delete-title">Delete {label}?</h2><p className="mt-3 text-sm leading-6 text-muted">{description}</p><div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" disabled={deleting} onClick={onCancel}>Keep {kind === "civic-sense" ? "posts" : "reports"}</Button><Button variant="danger" disabled={deleting} onClick={onDelete}><Trash2 size={16} /> {deleting ? "Deleting…" : "Delete permanently"}</Button></div></CardContent></Card></div>;
+}
+
+function ModeratorNoticeViewport({ notices, onDismiss }: { notices: ModeratorNotice[]; onDismiss: (id: number) => void }) {
+  if (!notices.length) return null;
+  return <div className="fixed right-4 top-4 z-[70] flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-3" aria-live="polite">
+    {notices.map((notice) => {
+      const success = notice.tone === "success";
+      return <div className={`flex items-start gap-3 rounded-2xl border p-4 shadow-surface ${success ? "border-[#b8dfd3] bg-[#effaf5] text-brand" : "border-[#efc7bf] bg-[#fff8f6] text-danger"}`} key={notice.id} role={success ? "status" : "alert"}>
+        {success ? <CheckCircle2 className="mt-0.5 shrink-0" size={19} /> : <ShieldAlert className="mt-0.5 shrink-0" size={19} />}
+        <div className="min-w-0 flex-1"><p className="text-sm font-bold leading-6">{notice.message}</p>{notice.actionHref ? <a className="mt-2 inline-flex items-center gap-1 text-xs font-bold underline underline-offset-4" href={notice.actionHref} target="_blank" rel="noreferrer">{notice.actionLabel ?? "Open post"} <ExternalLink size={13} /></a> : null}</div>
+        <button className="grid size-7 shrink-0 place-items-center rounded-lg transition hover:bg-black/5" type="button" onClick={() => onDismiss(notice.id)} aria-label="Dismiss notification"><X size={16} /></button>
+      </div>;
+    })}
+  </div>;
 }
 
 function TabButton({ active, children, onClick }: { active: boolean; children: React.ReactNode; onClick: () => void }) { return <button className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition ${active ? "bg-white text-ink shadow-sm" : "text-muted hover:text-ink"}`} onClick={onClick} type="button">{children}</button>; }
 function CivicSenseStatusBadge({ status }: { status: CivicSenseStatus }) { const tone = status === "posted" ? "safe" : status === "rejected" ? "urgent" : status === "approved" ? "caution" : "neutral"; return <Badge tone={tone}>{status.replaceAll("-", " ")}</Badge>; }
-function Metric({ label, tone = "brand", value }: { label: string; tone?: "brand" | "danger" | "women"; value: string }) { const color = tone === "danger" ? "text-danger" : tone === "women" ? "text-[#a22a58]" : "text-brand"; return <div className="rounded-2xl border border-line bg-[#fbfdfc] p-4"><p className="min-h-10 text-xs font-bold uppercase leading-5 tracking-[0.1em] text-muted">{label}</p><p className={`mt-2 font-display text-3xl font-bold ${color}`}>{value}</p></div>; }
+function Metric({ active = false, label, onClick, tone = "brand", value }: { active?: boolean; label: string; onClick?: () => void; tone?: "brand" | "danger" | "women"; value: string }) { const color = tone === "danger" ? "text-danger" : tone === "women" ? "text-[#a22a58]" : "text-brand"; return <button aria-pressed={active} className={`rounded-2xl border p-4 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${active ? "border-brand bg-brand-soft shadow-sm" : "border-line bg-[#fbfdfc] hover:-translate-y-0.5 hover:border-brand/50 hover:shadow-sm"}`} onClick={onClick} type="button"><p className="min-h-10 text-xs font-bold uppercase leading-5 tracking-[0.1em] text-muted">{label}</p><p className={`mt-2 font-display text-3xl font-bold ${color}`}>{value}</p></button>; }
 function Info({ label, value }: { label: string; value: string }) { return <div><p className="text-xs font-bold uppercase tracking-[0.1em] text-muted">{label}</p><p className="mt-1 whitespace-pre-wrap text-sm leading-6">{value}</p></div>; }
 function EmptyState({ detail, icon, title }: { detail: string; icon: React.ReactNode; title: string }) { return <div className="grid min-h-72 place-items-center text-center"><div>{icon}<p className="mt-4 font-display text-xl font-bold">{title}</p><p className="mt-2 text-sm text-muted">{detail}</p></div></div>; }
 function MapLink({ href, label, tone = "brand" }: { href: string; label: string; tone?: "brand" | "danger" }) { return <a className={`mt-6 inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold text-white ${tone === "danger" ? "bg-danger" : "bg-brand"}`} href={href} target="_blank" rel="noreferrer"><MapPin size={16} /> {label} <ExternalLink size={14} /></a>; }

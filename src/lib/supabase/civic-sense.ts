@@ -85,8 +85,26 @@ export async function updateCivicSenseStatus(submissionId: string, status: Civic
 }
 
 export async function deleteCivicSenseSubmission(submissionId: string) {
+  const submission = await getCivicSenseSubmission(submissionId);
+  if (submission?.mediaUrls.length) await removeCivicSenseMedia(submissionId);
+
   const supabase = getSupabaseAdmin();
   const { error } = await supabase.from("civic_sense_submissions").delete().eq("submission_id", submissionId);
+  if (error) throw new Error(error.message);
+}
+
+// Keep the published post's audit trail, but remove the original citizen media
+// from both Storage and the database once Instagram has accepted the post.
+export async function purgeCivicSenseSubmissionMedia(submissionId: string) {
+  const submission = await getCivicSenseSubmission(submissionId);
+  if (!submission) throw new Error("Civic Sense submission was not found.");
+
+  if (submission.mediaUrls.length) await removeCivicSenseMedia(submissionId);
+
+  const supabase = getSupabaseAdmin();
+  const { error } = await supabase.from("civic_sense_submissions")
+    .update({ media_count: 0, media_types: [], media_urls: [], updated_at: new Date().toISOString() })
+    .eq("submission_id", submissionId);
   if (error) throw new Error(error.message);
 }
 
@@ -110,7 +128,7 @@ export async function uploadCivicSenseMedia(submissionId: string, media: File[])
   if (!media.length) return [];
   const supabase = getSupabaseAdmin();
   const bucket = process.env.CIVIC_SENSE_MEDIA_BUCKET ?? "civic-sense-media";
-  await supabase.storage.createBucket(bucket, { public: true, fileSizeLimit: 50 * 1024 * 1024, allowedMimeTypes: ["video/webm", "video/mp4", "video/quicktime", "audio/webm", "audio/mpeg", "audio/mp4", "audio/wav"] }).catch(() => null);
+  await supabase.storage.createBucket(bucket, { public: true, fileSizeLimit: 50 * 1024 * 1024, allowedMimeTypes: ["image/jpeg", "image/png", "image/webp", "video/webm", "video/mp4", "video/quicktime", "video/x-m4v"] }).catch(() => null);
   const urls: string[] = [];
   for (const [index, file] of media.entries()) {
     const extension = extensionFor(file);
@@ -121,6 +139,21 @@ export async function uploadCivicSenseMedia(submissionId: string, media: File[])
     urls.push(data.publicUrl);
   }
   return urls;
+}
+
+async function removeCivicSenseMedia(submissionId: string) {
+  const supabase = getSupabaseAdmin();
+  const bucket = process.env.CIVIC_SENSE_MEDIA_BUCKET ?? "civic-sense-media";
+  const { data, error } = await supabase.storage.from(bucket).list(submissionId, { limit: 100 });
+  if (error) throw new Error(`Civic Sense media could not be listed for cleanup: ${error.message}`);
+
+  const paths = (data ?? [])
+    .filter((item) => item.name && item.name !== ".emptyFolderPlaceholder")
+    .map((item) => `${submissionId}/${item.name}`);
+  if (!paths.length) return;
+
+  const { error: removeError } = await supabase.storage.from(bucket).remove(paths);
+  if (removeError) throw new Error(`Civic Sense media could not be removed: ${removeError.message}`);
 }
 
 function mapSubmission(row: DbCivicSenseSubmission): CivicSenseSubmission {
@@ -147,9 +180,11 @@ function mapSubmission(row: DbCivicSenseSubmission): CivicSenseSubmission {
 }
 
 function extensionFor(file: File) {
+  if (file.type.includes("jpeg")) return "jpg";
+  if (file.type.includes("png")) return "png";
+  if (file.type.includes("webp")) return "webp";
   if (file.type.includes("mp4")) return "mp4";
   if (file.type.includes("quicktime")) return "mov";
-  if (file.type.includes("mpeg")) return "mp3";
-  if (file.type.includes("wav")) return "wav";
-  return file.type.startsWith("audio/") ? "webm" : "webm";
+  if (file.type.includes("m4v")) return "m4v";
+  return "webm";
 }

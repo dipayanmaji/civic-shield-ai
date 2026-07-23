@@ -25,10 +25,10 @@ export async function POST(request: Request) {
     const creatorMention = getInstagramMention(formData.get("instagramUsername")?.toString());
     const latitude = Number(formData.get("latitude"));
     const longitude = Number(formData.get("longitude"));
-    const media = formData.getAll("media").filter((value): value is File => value instanceof File).slice(0, 2);
-    if (experience.length < 10 && media.length === 0) {
-      return NextResponse.json({ error: "Add a short description or a media recording." }, { status: 400 });
-    }
+    const media = formData.getAll("media").filter((value): value is File => value instanceof File && value.size > 0).slice(0, 2);
+    if (!media.length) return NextResponse.json({ error: "Add at least one photo or video before submitting." }, { status: 400 });
+    const unsupportedMedia = media.find((file) => !isSupportedCivicSenseMedia(file.type));
+    if (unsupportedMedia) return NextResponse.json({ error: `${unsupportedMedia.name} is not a supported photo or video.` }, { status: 400 });
 
     const generatedAi = await generateCivicSenseCaption({ experience, locationLabel, mediaTypes: media.map((file) => file.type) });
     const ai = {
@@ -176,6 +176,11 @@ function normalizeHashtags(values: string[]) {
     .filter(Boolean)
     .map((value) => `#${value}`);
   return [...new Set(hashtags)].slice(0, 8);
+}
+
+function isSupportedCivicSenseMedia(mediaType: string) {
+  const mimeType = mediaType.split(";", 1)[0]?.trim().toLowerCase();
+  return ["image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime", "video/x-m4v", "video/webm"].includes(mimeType ?? "");
 }
 
 async function encodeEmail({ to, subject, body, attachments }: { to: string; subject: string; body: string; attachments: File[] }) {
