@@ -90,3 +90,17 @@ select {
     transform: translateX(-50%);
   }
 }
+
+.global-activity-loader-bar {
+  animation: global-activity-loader 1.1s ease-in-out infinite;
+}
+
+@keyframes global-activity-loader {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(260%);
+  }
+}

@@ -19,6 +19,7 @@ import { CivicSenseFab } from "@/components/landing/civic-sense-fab";
 import { FeedbackSection } from "@/components/landing/feedback-section";
 import { LocationSafetySnapshot } from "@/components/landing/location-safety-snapshot";
 import { QuickIncidentRecordSlot } from "@/components/landing/quick-incident-record-slot";
+import { PwaInstallButton } from "@/components/shared/pwa-install-button";
 
 const civicSteps = [
   {
@@ -70,9 +71,12 @@ export default function Home() {
           <Link className="transition-colors hover:text-brand" href="/moderator" target="_blank" rel="noreferrer">Moderator sign in</Link>
         </nav>
 
-        <Button asChild className="hidden sm:inline-flex" size="sm">
-          <Link href="/report">Start a report</Link>
-        </Button>
+        <div className="flex items-center gap-2">
+          <PwaInstallButton />
+          <Button asChild className="hidden sm:inline-flex" size="sm">
+            <Link href="/report">Start a report</Link>
+          </Button>
+        </div>
       </header>
 
       <section className="relative mx-auto grid max-w-7xl gap-8 px-5 pb-16 pt-8 lg:grid-cols-[1.05fr_.95fr] lg:px-8 lg:pb-20 lg:pt-12">

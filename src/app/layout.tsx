@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 
 import { EmergencyAlertMarquee } from "@/components/emergency/emergency-alert-marquee";
+import { GlobalActivityLoader } from "@/components/shared/global-activity-loader";
 import { PwaRegister } from "@/components/shared/pwa-register";
 import { SiteFooter } from "@/components/shared/site-footer";
 
@@ -38,6 +39,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en">
       <body className="antialiased">
         <PwaRegister />
+        <GlobalActivityLoader />
         <EmergencyAlertMarquee />
         {children}
         <SiteFooter />

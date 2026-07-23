@@ -46,10 +46,8 @@ export async function POST(request: Request) {
     const mediaUrls = await uploadCivicSenseMedia(submissionId, media);
     if (mediaUrls.length) await updateCivicSenseMediaUrls(submissionId, mediaUrls);
 
-    void sendModeratorEmail({ submissionId, experience, locationLabel, latitude, longitude, ai, media }).catch((error) => {
-      console.error("Civic Sense moderator email failed", error);
-    });
-    return NextResponse.json({ submissionId, caption: ai.caption, hashtags: ai.hashtags, instagramHandle }, { status: 201 });
+    const moderatorEmailId = await sendModeratorEmail({ submissionId, experience, locationLabel, latitude, longitude, ai, media });
+    return NextResponse.json({ submissionId, caption: ai.caption, hashtags: ai.hashtags, instagramHandle, moderatorEmailId }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Civic Sense submission could not be saved.";
     return NextResponse.json({ error: message }, { status: 500 });
@@ -118,8 +116,9 @@ async function sendModeratorEmail({
   media: File[];
 }) {
   const token = await getOwnerGmailAccessToken();
-  const to = process.env.CIVIC_SENSE_MODERATOR_EMAIL ?? "kushalkg0000@gmail.com";
-  if (!token || !to) return;
+  const to = process.env.CIVIC_SENSE_MODERATOR_EMAIL?.trim();
+  if (!to) throw new Error("CIVIC_SENSE_MODERATOR_EMAIL is not configured.");
+  if (!token) throw new Error("Civic Sense moderator email delivery is not configured. Add a Gmail refresh token.");
   const mapLine = Number.isFinite(latitude) && Number.isFinite(longitude) ? `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}` : "Location coordinates not available";
   const body = [
     `New Civic Sense submission: ${submissionId}`,
@@ -149,10 +148,11 @@ async function sendModeratorEmail({
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ raw }),
   });
+  const result = await response.json().catch(() => null) as { id?: string; error?: { message?: string } } | null;
   if (!response.ok) {
-    const result = await response.json().catch(() => null) as { error?: { message?: string } } | null;
     throw new Error(result?.error?.message ?? "Gmail send failed.");
   }
+  return result?.id ?? null;
 }
 
 async function encodeEmail({ to, subject, body, attachments }: { to: string; subject: string; body: string; attachments: File[] }) {
