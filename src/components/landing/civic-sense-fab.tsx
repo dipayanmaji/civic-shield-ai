@@ -13,6 +13,9 @@ type CameraCapabilities = { zoom?: ZoomRange };
 
 const maxMediaFiles = 2;
 const maxRecordingMs = 30000;
+const portraitRecordingWidth = 720;
+const portraitRecordingHeight = 1280;
+const portraitRecordingFrameRate = 30;
 
 export function CivicSenseFab() {
   const [open, setOpen] = useState(false);
@@ -39,6 +42,8 @@ export function CivicSenseFab() {
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recordingClockRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const saveRecordingRef = useRef(true);
+  const portraitRecordingStreamRef = useRef<MediaStream | null>(null);
+  const portraitRenderFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!open || !navigator.geolocation) return;
@@ -105,14 +110,56 @@ export function CivicSenseFab() {
     setMedia((current) => current.filter((_, itemIndex) => itemIndex !== index));
   }
 
+  function stopPortraitFrameRenderer() {
+    if (portraitRenderFrameRef.current !== null) {
+      cancelAnimationFrame(portraitRenderFrameRef.current);
+      portraitRenderFrameRef.current = null;
+    }
+  }
+
+  function stopPortraitRecordingPipeline() {
+    stopPortraitFrameRenderer();
+    portraitRecordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    portraitRecordingStreamRef.current = null;
+  }
+
+  function createPortraitRecordingStream(sourceStream: MediaStream, preview: HTMLVideoElement) {
+    if (typeof HTMLCanvasElement === "undefined") return null;
+    const canvas = document.createElement("canvas");
+    if (typeof canvas.captureStream !== "function") return null;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return null;
+
+    stopPortraitRecordingPipeline();
+    canvas.width = portraitRecordingWidth;
+    canvas.height = portraitRecordingHeight;
+
+    const renderFrame = () => {
+      if (preview.videoWidth && preview.videoHeight && preview.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        drawVideoToPortraitFrame(context, preview, canvas.width, canvas.height);
+      }
+      portraitRenderFrameRef.current = requestAnimationFrame(renderFrame);
+    };
+    renderFrame();
+
+    const recordingStream = canvas.captureStream(portraitRecordingFrameRate);
+    sourceStream.getAudioTracks().forEach((track) => recordingStream.addTrack(track));
+    portraitRecordingStreamRef.current = recordingStream;
+    return recordingStream;
+  }
+
   function cleanupCamera(saveRecording: boolean) {
     if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
     stopTimerRef.current = null;
     if (recordingClockRef.current) clearInterval(recordingClockRef.current);
     recordingClockRef.current = null;
     saveRecordingRef.current = saveRecording;
-    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    const recorder = recorderRef.current;
+    const recorderIsActive = recorder?.state === "recording";
+    if (recorderIsActive) recorder.stop();
     recorderRef.current = null;
+    stopPortraitFrameRenderer();
+    if (!recorderIsActive) stopPortraitRecordingPipeline();
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     if (cameraPreviewRef.current) cameraPreviewRef.current.srcObject = null;
@@ -205,26 +252,58 @@ export function CivicSenseFab() {
 
   function startVideoRecording() {
     const stream = streamRef.current;
-    if (!stream || isRecording) return;
+    const preview = cameraPreviewRef.current;
+    if (!stream || !preview || isRecording) return;
+    if (!preview.videoWidth || !preview.videoHeight) {
+      setStatus("The camera is still starting. Please try again in a moment.");
+      return;
+    }
+
+    const portraitStream = createPortraitRecordingStream(stream, preview);
+    if (!portraitStream) {
+      setStatus("This browser cannot create an Instagram-ready camera recording. You can still upload a vertical MP4 or MOV video.");
+      return;
+    }
+
     chunksRef.current = [];
     const recordingMimeType = getPreferredRecordingMimeType();
-    const recorder = recordingMimeType ? new MediaRecorder(stream, { mimeType: recordingMimeType }) : new MediaRecorder(stream);
+    if (!recordingMimeType) {
+      stopPortraitRecordingPipeline();
+      setStatus("This browser cannot record an Instagram-ready MP4 video. Please upload a vertical MP4 or MOV video instead.");
+      return;
+    }
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(portraitStream, { mimeType: recordingMimeType });
+    } catch {
+      stopPortraitRecordingPipeline();
+      setStatus("This browser cannot record an Instagram-ready MP4 video. Please upload a vertical MP4 or MOV video instead.");
+      return;
+    }
     recorderRef.current = recorder;
     recorder.ondataavailable = (event) => { if (event.data.size > 0) chunksRef.current.push(event.data); };
     recorder.onstop = () => {
-      if (!saveRecordingRef.current) { chunksRef.current = []; return; }
+      const shouldSaveRecording = saveRecordingRef.current;
       const type = baseMediaMimeType(recorder.mimeType || recordingMimeType || "video/webm");
       const blob = new Blob(chunksRef.current, { type });
+      chunksRef.current = [];
+      stopPortraitRecordingPipeline();
+      if (!shouldSaveRecording) return;
       if (!blob.size) return;
       const extension = type.includes("mp4") ? "mp4" : type.includes("quicktime") ? "mov" : "webm";
       const file = new File([blob], `civic-sense-video-${Date.now()}.${extension}`, { type });
       void getVideoMetadata(file).then((metadata) => {
+        if (metadata.duration > 30.5) {
+          setStatus("This recording is longer than 30 seconds. Please record a shorter video.");
+          return;
+        }
         if (!isVerticalVideo(metadata.width, metadata.height)) {
-          setStatus("Your camera did not provide a vertical video. Rotate the phone upright and record again for Instagram.");
+          setStatus("We could not prepare a portrait video from this camera. Please try recording again.");
           return;
         }
         setMedia((current) => [file, ...current].slice(0, maxMediaFiles));
-      }).catch(() => setStatus("We could not verify this video. Please record again or upload a vertical MP4/MOV video."));
+      }).catch(() => setStatus("We could not verify this video. Please try recording again."));
     };
     saveRecordingRef.current = true;
     recorder.start();
@@ -300,7 +379,7 @@ export function CivicSenseFab() {
               <div>
                 <p className="eyebrow">Civic Sense Check</p>
                 <h2 className="mt-2 font-display text-2xl font-bold">Share a Zero Civic Sense moment</h2>
-                <p className="mt-2 text-sm leading-6 text-muted">Share an everyday public-behaviour problem through a photo or short vertical video, such as littering, unsafe behaviour, or damage to shared spaces. The CivicShield team will review it and, if approved, post it on <a className="font-semibold text-brand underline underline-offset-4" href="https://www.instagram.com/civicshieldai/" rel="noreferrer" target="_blank">Instagram</a> and <a className="font-semibold text-brand underline underline-offset-4" href="https://www.facebook.com/civicshieldai/" rel="noreferrer" target="_blank">Facebook</a> with credit to you. <span className="font-semibold text-brand">Small acts, safer spaces.</span></p>
+                <p className="mt-2 text-sm leading-6 text-muted">Share an everyday public-behaviour problem through a photo or short vertical video, such as littering, unsafe behaviour, or damage to shared spaces. The CivicShield team will review it and, if approved, post it on <a className="font-semibold text-brand underline underline-offset-4" href="https://www.instagram.com/civicshieldai/" rel="noreferrer" target="_blank">Instagram</a> and <a className="font-semibold text-brand underline underline-offset-4" href="https://www.facebook.com/civicshieldai/" rel="noreferrer" target="_blank">Facebook</a> with credit to you. <span className="font-semibold text-brand">Small Acts, Safer Spaces.</span></p>
               </div>
               <button className="grid size-10 place-items-center rounded-xl border border-line" onClick={closeDialog} type="button" aria-label="Close">
                 <X size={18} />
@@ -369,7 +448,7 @@ export function CivicSenseFab() {
             <div className="flex items-center justify-between border-b border-white/10 px-5 py-4 text-white">
               <div>
                 <p className="text-sm font-bold">{cameraMode === "video" ? "Record a vertical video" : "Capture a photo"}</p>
-                <p className="mt-1 text-xs text-white/65">Hold your phone upright for Instagram-ready 9:16 media.</p>
+                <p className="mt-1 text-xs text-white/65">CivicShield records video in a fixed Instagram-ready 9:16 frame.</p>
               </div>
               <button className="grid size-10 place-items-center rounded-xl border border-white/15 text-white" type="button" onClick={() => cleanupCamera(false)} aria-label="Close camera"><X size={18} /></button>
             </div>
@@ -450,13 +529,38 @@ function isVerticalVideo(width: number, height: number) {
   return ratio >= 0.5 && ratio <= 0.65;
 }
 
+function drawVideoToPortraitFrame(
+  context: CanvasRenderingContext2D,
+  video: HTMLVideoElement,
+  targetWidth: number,
+  targetHeight: number,
+) {
+  const sourceWidth = video.videoWidth;
+  const sourceHeight = video.videoHeight;
+  if (!sourceWidth || !sourceHeight) return;
+
+  const scale = Math.max(targetWidth / sourceWidth, targetHeight / sourceHeight);
+  const drawWidth = sourceWidth * scale;
+  const drawHeight = sourceHeight * scale;
+
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, targetWidth, targetHeight);
+  context.drawImage(
+    video,
+    (targetWidth - drawWidth) / 2,
+    (targetHeight - drawHeight) / 2,
+    drawWidth,
+    drawHeight,
+  );
+}
+
 function getCameraCapabilities(track: MediaStreamTrack | undefined) {
   const getCapabilities = (track as unknown as { getCapabilities?: () => CameraCapabilities } | undefined)?.getCapabilities;
   return track && getCapabilities ? getCapabilities.call(track) : undefined;
 }
 
 function getPreferredRecordingMimeType() {
-  const candidates = ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm"];
+  const candidates = ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4"];
   return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
 }
 
