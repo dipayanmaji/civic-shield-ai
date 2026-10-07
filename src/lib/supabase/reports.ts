@@ -1,5 +1,5 @@
 import { getSupabaseAdmin } from "@/lib/supabase/server";
-import { publicCoordinate, publicLocationLabel } from "@/lib/privacy/public-report";
+import { publicAlertText, publicCoordinate, publicLocationLabel } from "@/lib/privacy/public-report";
 import type { CivicReport, PublicCivicReport, PublicCivicReportDetail, PublicStatusEvent, ReportStatus, SafetyAnalysis } from "@/types/report";
 
 type DbReport = {
@@ -69,14 +69,22 @@ export async function markPersistentDelivery(reportId: string, recipient: string
   const supabase = getSupabaseAdmin();
   const sentAt = new Date().toISOString();
   const { error } = await supabase.from("civic_reports").update({
-    status: "delivery-confirmed",
     email_recipient: recipient,
     gmail_message_id: messageId ?? null,
     email_sent_at: sentAt,
     updated_at: sentAt,
   }).eq("report_id", reportId);
   if (error) throw new Error(error.message);
-  await addStatusEvent(reportId, "delivery-confirmed", "Email accepted by Gmail for delivery.");
+
+  // Only advance reports that have not been picked up yet. A moderator-set status
+  // (acknowledged, in-progress, resolved, ...) must not be rolled back by a later send.
+  const { data: advanced, error: statusError } = await supabase.from("civic_reports")
+    .update({ status: "delivery-confirmed" })
+    .eq("report_id", reportId)
+    .in("status", ["draft", "ready-to-analyze", "submitted"])
+    .select("report_id");
+  if (statusError) throw new Error(statusError.message);
+  if (advanced?.length) await addStatusEvent(reportId, "delivery-confirmed", "Email accepted by Gmail for delivery.");
 }
 
 export async function getPublicReports(limit = 30): Promise<PublicCivicReport[]> {
@@ -105,7 +113,7 @@ export async function getNearbyPublicReports(latitude: number, longitude: number
   return reports
     .map((report) => ({
       ...report,
-      distanceMeters: report.latitude && report.longitude ? getDistanceMeters(latitude, longitude, report.latitude, report.longitude) : undefined,
+      distanceMeters: report.latitude !== null && report.longitude !== null ? getDistanceMeters(latitude, longitude, report.latitude, report.longitude) : undefined,
     }))
     .filter((report) => typeof report.distanceMeters === "number" && report.distanceMeters <= radiusKm * 1000)
     .sort((first, second) => {
@@ -133,13 +141,14 @@ export async function getPublicReportDetail(reportId: string): Promise<PublicCiv
   if (eventsError) throw new Error(eventsError.message);
 
   const report = data as DbReportDetail;
+  const locationLabel = publicLocationLabel(report.location_label);
   return {
     id: report.report_id,
     description: report.analysis?.riskSummary ?? "A civic report is under review.",
     category: report.category,
     urgency: report.urgency,
     status: report.status,
-    locationLabel: publicLocationLabel(report.location_label),
+    locationLabel,
     latitude: publicCoordinate(report.latitude),
     longitude: publicCoordinate(report.longitude),
     duration: report.duration,
@@ -147,7 +156,11 @@ export async function getPublicReportDetail(reportId: string): Promise<PublicCiv
     extraDetails: null,
     attachmentCount: report.attachment_count,
     routeName: report.route_name,
-    analysis: report.analysis,
+    analysis: report.analysis ? {
+      riskSummary: report.analysis.riskSummary,
+      immediateActions: Array.isArray(report.analysis.immediateActions) ? report.analysis.immediateActions : [],
+      publicAlert: publicAlertText(report.category, locationLabel),
+    } : null,
     createdAt: report.created_at,
     updatedAt: report.updated_at,
     statusEvents: ((events ?? []) as DbStatusEvent[]).map((event): PublicStatusEvent => ({

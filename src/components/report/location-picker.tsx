@@ -5,6 +5,7 @@ import { Crosshair, LoaderCircle, MapPin, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import type { IncidentLocation } from "@/types/report";
 
 const LocationMap = dynamic(() => import("./location-map").then((module) => module.LocationMap), {
@@ -35,6 +36,7 @@ export function LocationPicker({
   const [searching, setSearching] = useState(false);
   const [notice, setNotice] = useState("");
   const [suggestions, setSuggestions] = useState<LocationSuggestion[]>([]);
+  const [suggesting, setSuggesting] = useState(false);
   const [selectionConfirmed, setSelectionConfirmed] = useState(false);
 
   useEffect(() => {
@@ -46,12 +48,14 @@ export function LocationPicker({
     }
     let active = true;
     const timer = window.setTimeout(() => {
+      setSuggesting(true);
       void fetch(`/api/geocode?q=${encodeURIComponent(query.trim())}`)
         .then((response) => response.json())
         .then((result: { results?: LocationSuggestion[] }) => { if (active) setSuggestions(uniqueSuggestions(result.results ?? [])); })
-        .catch(() => { if (active) setSuggestions([]); });
+        .catch(() => { if (active) setSuggestions([]); })
+        .finally(() => { if (active) setSuggesting(false); });
     }, 450);
-    return () => { active = false; window.clearTimeout(timer); };
+    return () => { active = false; window.clearTimeout(timer); setSuggesting(false); };
   }, [query, selectionConfirmed]);
 
   function confirmLocation(next: IncidentLocation) {
@@ -157,6 +161,10 @@ export function LocationPicker({
             Search
           </Button>
         </div>
+        {query.trim().length >= 3 && !selectionConfirmed && suggesting && !suggestions.length ? <div className="absolute inset-x-0 top-full z-[1100] mt-2 space-y-1 rounded-xl border border-line bg-white p-2 shadow-surface" role="status" aria-busy="true">
+          <span className="sr-only">Searching locations</span>
+          {[0, 1, 2].map((item) => <Skeleton className={`h-9 ${item === 0 ? "w-11/12" : item === 1 ? "w-3/4" : "w-5/6"}`} key={item} />)}
+        </div> : null}
         {query.trim().length >= 3 && suggestions.length ? <div className="absolute inset-x-0 top-full z-[1100] mt-2 max-h-60 overflow-auto rounded-xl border border-line bg-white p-1 shadow-surface" role="listbox" aria-label="Location suggestions">
         {suggestions.map((suggestion) => <button key={`${suggestion.latitude}-${suggestion.longitude}-${suggestion.label}`} type="button" role="option" aria-selected={false} className="block w-full rounded-lg px-3 py-2.5 text-left text-sm leading-5 text-ink transition hover:bg-brand-soft focus:bg-brand-soft focus:outline-none" onClick={() => confirmLocation({ ...suggestion, source: "search" })}>{suggestion.label}</button>)}
         </div> : null}

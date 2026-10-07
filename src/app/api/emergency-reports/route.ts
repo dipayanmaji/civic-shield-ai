@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 
+import { parseEmergencyReportInput } from "@/lib/emergency/report-input";
+import { parseLatitude, parseLongitude, parseRadiusKm } from "@/lib/geo/coordinates";
 import { allowRequest, rateLimitedResponse } from "@/lib/security/rate-limit";
 import { sendTeamNotification } from "@/lib/notifications/team-email";
 import { createEmergencyReport, getEmergencyReports } from "@/lib/supabase/emergency";
@@ -8,20 +10,25 @@ import type { EmergencyReport, UrgencyLevel } from "@/types/report";
 
 export async function GET(request: Request) {
   if (!isSupabaseConfigured()) return NextResponse.json({ reports: [] });
+  const rate = allowRequest(request, "emergency-list", 30);
+  if (!rate.allowed) return rateLimitedResponse(rate.retryAfterSeconds);
 
   const url = new URL(request.url);
-  const latitude = Number(url.searchParams.get("lat"));
-  const longitude = Number(url.searchParams.get("lon"));
-  const radiusKm = Number(url.searchParams.get("radiusKm") ?? 5);
+  // Without both coordinates, list recent alerts everywhere. Number(null) would read a missing
+  // value as 0,0 and match nothing, which hid every alert when location permission was denied.
+  const latitude = parseLatitude(url.searchParams.get("lat"));
+  const longitude = parseLongitude(url.searchParams.get("lon"));
+  const hasLocation = latitude !== null && longitude !== null;
+  const radiusKm = parseRadiusKm(url.searchParams.get("radiusKm"), 5);
 
   try {
     const reports = await getEmergencyReports({
-      latitude: Number.isFinite(latitude) ? latitude : undefined,
-      longitude: Number.isFinite(longitude) ? longitude : undefined,
-      radiusKm: Number.isFinite(radiusKm) ? radiusKm : 5,
+      latitude: hasLocation ? latitude : undefined,
+      longitude: hasLocation ? longitude : undefined,
+      radiusKm,
       limit: 30,
     });
-    return NextResponse.json({ reports: await prioritizeEmergencyReports(reports) });
+    return NextResponse.json({ reports: await prioritizeEmergencyReports(reports, request) });
   } catch {
     return NextResponse.json({ reports: [] });
   }
@@ -32,31 +39,14 @@ export async function POST(request: Request) {
   if (!rate.allowed) return rateLimitedResponse(rate.retryAfterSeconds);
   if (!isSupabaseConfigured()) return NextResponse.json({ error: "Emergency reporting is not configured." }, { status: 503 });
 
-  const body = await request.json() as {
-    report?: {
-      type?: string;
-      locationLabel?: string;
-      latitude?: number | null;
-      longitude?: number | null;
-      details?: string | null;
-      isSafe?: boolean;
-    };
-  };
-  const report = body.report;
-  if (!report?.type || !report.locationLabel) {
-    return NextResponse.json({ error: "Emergency type and location are required." }, { status: 400 });
-  }
+  const body = await request.json().catch(() => null) as { report?: unknown } | null;
+  const parsed = parseEmergencyReportInput(body?.report);
+  if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+  const report = parsed.report;
 
   try {
-    const emergencyId = await createEmergencyReport({
-      type: report.type,
-      locationLabel: report.locationLabel,
-      latitude: report.latitude,
-      longitude: report.longitude,
-      details: report.details,
-      isSafe: Boolean(report.isSafe),
-    });
-    const mapUrl = report.latitude != null && report.longitude != null
+    const emergencyId = await createEmergencyReport(report);
+    const mapUrl = report.latitude !== null && report.longitude !== null
       ? `https://www.google.com/maps/search/?api=1&query=${report.latitude},${report.longitude}`
       : "Not available";
     await sendTeamNotification({
@@ -66,7 +56,7 @@ export async function POST(request: Request) {
         `Type: ${report.type}`,
         `Location: ${report.locationLabel}`,
         `Map: ${mapUrl}`,
-        `Details: ${report.details?.trim() || "Not provided"}`,
+        `Details: ${report.details ?? "Not provided"}`,
         `User marked safe: ${report.isSafe ? "Yes" : "No"}`,
         "",
         "This is a CivicShield incident record. In immediate danger, call 112.",
@@ -78,7 +68,7 @@ export async function POST(request: Request) {
   }
 }
 
-async function prioritizeEmergencyReports(reports: EmergencyReport[]) {
+async function prioritizeEmergencyReports(reports: EmergencyReport[], request: Request) {
   const fallback = reports.map((report) => ({
     ...report,
     priority: inferPriority(report),
@@ -87,6 +77,9 @@ async function prioritizeEmergencyReports(reports: EmergencyReport[]) {
 
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey || reports.length === 0) return fallback;
+  // Groq is called on every list request, so it gets its own, tighter budget. Past it the list is
+  // still ranked by the built-in rules rather than failing.
+  if (!allowRequest(request, "emergency-list-ai", 6).allowed) return fallback;
 
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {

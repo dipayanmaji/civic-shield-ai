@@ -1,10 +1,15 @@
 import { NextResponse } from "next/server";
 
+import { headerValue, quotedParameter } from "@/lib/email/mime";
+import { parseLatitude, parseLongitude } from "@/lib/geo/coordinates";
 import { getOwnerGmailAccessToken } from "@/lib/gmail/access-token";
 import { getTeamNotificationRecipients } from "@/lib/notifications/team-email";
 import { allowRequest, rateLimitedResponse } from "@/lib/security/rate-limit";
 import { createCivicSenseSubmission, updateCivicSenseMediaUrls, uploadCivicSenseMedia } from "@/lib/supabase/civic-sense";
 import { isSupabaseConfigured } from "@/lib/supabase/server";
+
+const MAX_EXPERIENCE_LENGTH = 600;
+const MAX_LOCATION_LENGTH = 300;
 
 type CivicSenseAi = {
   caption: string;
@@ -20,11 +25,15 @@ export async function POST(request: Request) {
 
   try {
     const formData = await request.formData();
-    const experience = formData.get("experience")?.toString().trim() ?? "";
-    const locationLabel = formData.get("locationLabel")?.toString().trim() || null;
+    // The form limits these (500 / location from reverse geocoding); the server enforces it too, since
+    // the text goes into an AI prompt, the database and the moderator email.
+    const experience = (formData.get("experience")?.toString().trim() ?? "").slice(0, MAX_EXPERIENCE_LENGTH);
+    const locationLabel = formData.get("locationLabel")?.toString().trim().slice(0, MAX_LOCATION_LENGTH) || null;
     const creatorMention = getInstagramMention(formData.get("instagramUsername")?.toString());
-    const latitude = Number(formData.get("latitude"));
-    const longitude = Number(formData.get("longitude"));
+    // The form only sends coordinates when location was shared; absent means null, not 0,0.
+    const parsedLatitude = parseLatitude(formData.get("latitude"));
+    const parsedLongitude = parseLongitude(formData.get("longitude"));
+    const coordinates = parsedLatitude !== null && parsedLongitude !== null ? { latitude: parsedLatitude, longitude: parsedLongitude } : null;
     const media = formData.getAll("media").filter((value): value is File => value instanceof File && value.size > 0).slice(0, 2);
     if (!media.length) return NextResponse.json({ error: "Add at least one photo or video before submitting." }, { status: 400 });
     const unsupportedMedia = media.find((file) => !isSupportedCivicSenseMedia(file.type));
@@ -40,8 +49,8 @@ export async function POST(request: Request) {
     const submissionId = await createCivicSenseSubmission({
       experience: experience || "Media-only Civic Sense submission.",
       locationLabel,
-      latitude: Number.isFinite(latitude) ? latitude : null,
-      longitude: Number.isFinite(longitude) ? longitude : null,
+      latitude: coordinates?.latitude ?? null,
+      longitude: coordinates?.longitude ?? null,
       mediaTypes: media.map((file) => file.type || "application/octet-stream"),
       mediaUrls: [],
       aiCaption: ai.caption,
@@ -53,7 +62,7 @@ export async function POST(request: Request) {
     const mediaUrls = await uploadCivicSenseMedia(submissionId, media);
     if (mediaUrls.length) await updateCivicSenseMediaUrls(submissionId, mediaUrls);
 
-    const moderatorEmailId = await sendModeratorEmail({ submissionId, experience, locationLabel, latitude, longitude, ai, media }).catch((error) => {
+    const moderatorEmailId = await sendModeratorEmail({ submissionId, experience, locationLabel, coordinates, ai, media }).catch((error) => {
       console.error("Civic Sense team notification failed:", error);
       return null;
     });
@@ -113,23 +122,21 @@ async function sendModeratorEmail({
   submissionId,
   experience,
   locationLabel,
-  latitude,
-  longitude,
+  coordinates,
   ai,
   media,
 }: {
   submissionId: string;
   experience: string;
   locationLabel: string | null;
-  latitude: number;
-  longitude: number;
+  coordinates: { latitude: number; longitude: number } | null;
   ai: CivicSenseAi;
   media: File[];
 }) {
   const token = await getOwnerGmailAccessToken();
   const to = getTeamNotificationRecipients().join(", ");
   if (!token) throw new Error("Civic Sense moderator email delivery is not configured. Add a Gmail refresh token.");
-  const mapLine = Number.isFinite(latitude) && Number.isFinite(longitude) ? `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}` : "Location coordinates not available";
+  const mapLine = coordinates ? `https://www.google.com/maps/search/?api=1&query=${coordinates.latitude},${coordinates.longitude}` : "Location coordinates not available";
   const body = [
     `New Civic Sense submission: ${submissionId}`,
     "",
@@ -184,15 +191,17 @@ function isSupportedCivicSenseMedia(mediaType: string) {
 }
 
 async function encodeEmail({ to, subject, body, attachments }: { to: string; subject: string; body: string; attachments: File[] }) {
+  const safeSubject = headerValue(subject);
   if (!attachments.length) {
-    return Buffer.from([`To: ${to}`, `Subject: ${subject}`, "MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8", "", body].join("\r\n")).toString("base64url");
+    return Buffer.from([`To: ${to}`, `Subject: ${safeSubject}`, "MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8", "", body].join("\r\n")).toString("base64url");
   }
   const boundary = `civic_sense_${crypto.randomUUID()}`;
-  const parts = [`To: ${to}`, `Subject: ${subject}`, "MIME-Version: 1.0", `Content-Type: multipart/mixed; boundary="${boundary}"`, "", `--${boundary}`, "Content-Type: text/plain; charset=UTF-8", "", body];
+  const parts = [`To: ${to}`, `Subject: ${safeSubject}`, "MIME-Version: 1.0", `Content-Type: multipart/mixed; boundary="${boundary}"`, "", `--${boundary}`, "Content-Type: text/plain; charset=UTF-8", "", body];
   for (const attachment of attachments) {
     const encoded = Buffer.from(await attachment.arrayBuffer()).toString("base64");
-    const safeName = attachment.name.replace(/["\\\r\n]/g, "_");
-    parts.push(`--${boundary}`, `Content-Type: ${attachment.type || "application/octet-stream"}; name="${safeName}"`, "Content-Transfer-Encoding: base64", `Content-Disposition: attachment; filename="${safeName}"`, "", encoded);
+    const safeName = quotedParameter(attachment.name) || "media";
+    const contentType = headerValue(attachment.type) || "application/octet-stream";
+    parts.push(`--${boundary}`, `Content-Type: ${contentType}; name="${safeName}"`, "Content-Transfer-Encoding: base64", `Content-Disposition: attachment; filename="${safeName}"`, "", encoded);
   }
   parts.push(`--${boundary}--`, "");
   return Buffer.from(parts.join("\r\n")).toString("base64url");

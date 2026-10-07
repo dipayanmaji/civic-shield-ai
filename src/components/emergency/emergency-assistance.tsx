@@ -25,6 +25,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton, SkeletonGroup } from "@/components/ui/skeleton";
 
 type EmergencyKind = "fire" | "medical" | "electrical" | "accident" | "unsafe" | "women";
 type NearbyKind = "police" | "hospital" | "ambulance" | "fire" | "safe-place";
@@ -114,23 +115,26 @@ export function EmergencyAssistance() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const [selectedType, setSelectedType] = useState<EmergencyKind>("women");
+  const requestedType = searchParams.get("type");
+  const [selectedType, setSelectedType] = useState<EmergencyKind>(isEmergencyKind(requestedType) ? requestedType : "women");
+  const [syncedRequestedType, setSyncedRequestedType] = useState(requestedType);
   const [location, setLocation] = useState("");
   const [details, setDetails] = useState("");
   const [isSafe, setIsSafe] = useState(false);
   const [savedReference, setSavedReference] = useState("");
+  const [lodging, setLodging] = useState(false);
   const [coordinates, setCoordinates] = useState<Coordinates | null>(null);
   const [locationStatus, setLocationStatus] = useState<"checking" | "ready" | "blocked" | "unsupported">("checking");
   const [locationLabel, setLocationLabel] = useState("");
   const [nearbyPlaces, setNearbyPlaces] = useState<Record<NearbyKind, NearbyPlace[]>>({ police: [], hospital: [], ambulance: [], fire: [], "safe-place": [] });
   const [nearbyStatus, setNearbyStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
 
-  useEffect(() => {
-    const requestedType = searchParams.get("type");
-    if (isEmergencyKind(requestedType)) {
-      setSelectedType(requestedType);
-    }
-  }, [searchParams]);
+  // Follow the ?type= in the URL when it changes (links, back/forward). Adjusting state while
+  // rendering, only when the param differs from the last one seen, avoids an extra effect pass.
+  if (requestedType !== syncedRequestedType) {
+    setSyncedRequestedType(requestedType);
+    if (isEmergencyKind(requestedType)) setSelectedType(requestedType);
+  }
 
   function selectEmergencyType(type: EmergencyKind) {
     setSelectedType(type);
@@ -228,6 +232,8 @@ export function EmergencyAssistance() {
   }, [activeEmergency]);
 
   async function saveEmergencyNote() {
+    if (lodging) return;
+    setLodging(true);
     const now = new Date();
     const reference = `EM-${now.getFullYear()}-${String(now.getTime()).slice(-6)}`;
     const note = {
@@ -277,6 +283,8 @@ export function EmergencyAssistance() {
       }
     } catch {
       // Local emergency note is still saved when server persistence is unavailable.
+    } finally {
+      setLodging(false);
     }
   }
 
@@ -301,7 +309,7 @@ export function EmergencyAssistance() {
               <div className="mt-5 grid gap-4 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
                 <label className="block"><span className="text-sm font-bold text-[#344540]">Captured location</span><span className="mt-2 flex items-center gap-2 rounded-xl border border-line bg-[#f3f7f5] px-3 text-muted"><MapPin aria-hidden="true" className="text-muted" size={17} /><input className="h-12 min-w-0 flex-1 cursor-default bg-transparent text-sm outline-none placeholder:text-[#8b9995]" placeholder={locationStatus === "checking" ? "Capturing your current location..." : "Location will appear here"} readOnly value={location} /></span></label>
                 <label className="block"><span className="text-sm font-bold text-[#344540]">Short detail</span><input className="mt-2 h-12 w-full rounded-xl border border-line bg-[#fbfdfc] px-3 text-sm outline-none placeholder:text-[#8b9995] transition focus:border-danger focus:ring-4 focus:ring-danger/10" onChange={(event) => setDetails(event.target.value)} placeholder="One line is enough." value={details} /></label>
-                <Button className="h-12 w-full lg:w-auto" onClick={() => void saveEmergencyNote()} variant="danger"><ShieldAlert aria-hidden="true" size={18} /> Lodge alert</Button>
+                <Button className="h-12 w-full lg:w-auto" disabled={lodging} onClick={() => void saveEmergencyNote()} variant="danger">{lodging ? <Loader2 aria-hidden="true" className="animate-spin" size={18} /> : <ShieldAlert aria-hidden="true" size={18} />} {lodging ? "Lodging alert…" : "Lodge alert"}</Button>
               </div>
               <label className="mt-4 flex items-start gap-3 rounded-xl border border-[#f0d0c9] bg-[#fff8f6] p-3 text-sm font-semibold text-[#4c3834]"><input checked={isSafe} className="mt-1 size-4 accent-[#be3b31]" onChange={(event) => setIsSafe(event.target.checked)} type="checkbox" /> I am currently away from immediate danger.</label>
               {savedReference ? <div className="mt-4 rounded-xl border border-[#cfe6dd] bg-[#f4fbf8] p-4 text-sm text-[#31544b]"><p className="font-bold">Record saved: {savedReference}</p><p className="mt-1 leading-6">This is a CivicShield incident note, not an emergency dispatch confirmation.</p></div> : null}
@@ -310,7 +318,7 @@ export function EmergencyAssistance() {
 
           <div className="mt-6 grid gap-6 xl:grid-cols-[0.78fr_1.22fr] xl:items-start">
             <Card className="rounded-[1.75rem] border-[#efc7bf] bg-white shadow-surface"><CardContent className="p-5 sm:p-6"><div className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-[#ffe4df] text-danger"><ActiveIcon aria-hidden={true} size={22} /></span><div><p className="eyebrow text-danger">What is happening?</p><h2 className="mt-1 font-display text-xl font-bold">Select one emergency type</h2><p className="mt-2 text-sm leading-6 text-muted">This changes the nearby help and safety guidance beside you.</p></div></div><div className="mt-5 grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-2">{emergencyTypes.map((type) => { const TypeIcon = type.icon; const active = type.id === selectedType; return <button className={`flex h-24 flex-col items-center justify-center gap-2 rounded-2xl border px-2 text-center text-sm font-bold transition ${active ? "border-danger bg-[#fff0ed] text-danger shadow-sm" : "border-[#f0d0c9] bg-[#fffaf8] text-[#4d5d59] hover:bg-white"}`} key={type.id} onClick={() => selectEmergencyType(type.id)} type="button"><TypeIcon aria-hidden={true} size={21} /><span>{type.label}</span></button>; })}</div></CardContent></Card>
-            <div className="space-y-6"><NearbyHelpPanel activeEmergency={activeEmergency} coordinates={coordinates} nearbyPlaces={nearbyPlaces} nearbyStatus={nearbyStatus} /><Card className="rounded-[1.75rem] border-[#efc7bf] bg-white"><CardContent className="p-5 sm:p-6"><p className="eyebrow text-danger">Safety checklist</p><h2 className="mt-2 font-display text-xl font-bold">{activeEmergency.label} guidance</h2><ul className="mt-5 space-y-3">{checklist.map((step) => <li className="flex gap-3 text-sm leading-6 text-[#475854]" key={step}><CheckCircle2 aria-hidden="true" className="mt-0.5 shrink-0 text-danger" size={17} /><span>{step}</span></li>)}</ul></CardContent></Card></div>
+            <div className="space-y-6"><NearbyHelpPanel activeEmergency={activeEmergency} coordinates={coordinates} locationStatus={locationStatus} nearbyPlaces={nearbyPlaces} nearbyStatus={nearbyStatus} /><Card className="rounded-[1.75rem] border-[#efc7bf] bg-white"><CardContent className="p-5 sm:p-6"><p className="eyebrow text-danger">Safety checklist</p><h2 className="mt-2 font-display text-xl font-bold">{activeEmergency.label} guidance</h2><ul className="mt-5 space-y-3">{checklist.map((step) => <li className="flex gap-3 text-sm leading-6 text-[#475854]" key={step}><CheckCircle2 aria-hidden="true" className="mt-0.5 shrink-0 text-danger" size={17} /><span>{step}</span></li>)}</ul></CardContent></Card></div>
           </div>
 
           <div className="mt-6 rounded-[1.75rem] border border-[#efc7bf] bg-white p-5 shadow-surface sm:p-7"><div className="grid gap-6 lg:grid-cols-[0.82fr_1.18fr] lg:items-center"><div><Badge tone="urgent" className="gap-1.5"><Siren aria-hidden="true" size={13} /> Quick response</Badge><h2 className="mt-4 font-display text-3xl font-bold tracking-tight text-[#251918] sm:text-4xl">Get help first.</h2><p className="mt-3 max-w-xl leading-7 text-muted">If there is immediate danger, call 112 now. Your live location is shown below for sharing with responders or trusted contacts.</p><a className="mt-5 flex min-h-16 items-center justify-center gap-3 rounded-2xl bg-danger px-6 py-4 text-lg font-bold text-white shadow-[0_18px_40px_rgb(190_59_49_/_24%)] transition hover:bg-[#a53129]" href="tel:112"><PhoneCall aria-hidden="true" size={23} /> Call 112 Now</a></div><div><LocationPanel coordinates={coordinates} locationLabel={locationLabel} locationStatus={locationStatus} /><div className="mt-4 grid grid-cols-3 gap-3 text-sm"><QuickFact label="1" value="Move safe" /><QuickFact label="2" value="Call 112" /><QuickFact label="3" value="Use nearby help" /></div></div></div></div>
@@ -357,11 +365,13 @@ function LocationPanel({
 function NearbyHelpPanel({
   activeEmergency,
   coordinates,
+  locationStatus,
   nearbyPlaces,
   nearbyStatus,
 }: {
   activeEmergency: { nearbyKinds: NearbyKind[]; id: EmergencyKind };
   coordinates: Coordinates | null;
+  locationStatus: "checking" | "ready" | "blocked" | "unsupported";
   nearbyPlaces: Record<NearbyKind, NearbyPlace[]>;
   nearbyStatus: "idle" | "loading" | "ready" | "error";
 }) {
@@ -377,14 +387,14 @@ function NearbyHelpPanel({
           </div>
           <Badge tone="urgent">{activeEmergency.nearbyKinds.length} live lookup{activeEmergency.nearbyKinds.length === 1 ? "" : "s"}</Badge>
         </div>
-        {!coordinates ? (
+        {!coordinates && locationStatus === "checking" ? (
+          <NearbyHelpSkeleton kinds={activeEmergency.nearbyKinds} label="Waiting for location permission" />
+        ) : !coordinates ? (
           <p className="mt-4 rounded-2xl border border-[#f0d0c9] bg-[#fff8f6] p-4 text-sm leading-6 text-muted">
             Allow location access to load nearby stations, hospitals, fire services, ambulance services, and safer public places.
           </p>
         ) : nearbyStatus === "loading" ? (
-          <div className="mt-4 flex items-center gap-2 rounded-2xl border border-line p-4 text-sm font-semibold text-muted">
-            <Loader2 aria-hidden="true" className="animate-spin text-danger" size={18} /> Finding nearby help...
-          </div>
+          <NearbyHelpSkeleton kinds={activeEmergency.nearbyKinds} label="Finding nearby help" />
         ) : nearbyStatus === "error" ? (
           <p className="mt-4 rounded-2xl border border-[#f0d0c9] bg-[#fff8f6] p-4 text-sm leading-6 text-muted">
             Nearby lookup is temporarily unavailable. Call 112 and share your location verbally.
@@ -398,6 +408,28 @@ function NearbyHelpPanel({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+// One placeholder group per kind of help that will be listed, so the panel keeps its height and shape.
+function NearbyHelpSkeleton({ kinds, label }: { kinds: NearbyKind[]; label: string }) {
+  return (
+    <SkeletonGroup className="mt-4 space-y-5" label={label}>
+      {kinds.map((kind) => (
+        <section key={kind}>
+          <div className="flex items-center gap-2"><Skeleton className="size-4 rounded" /><Skeleton className="h-4 w-40" /></div>
+          <div className="mt-2 space-y-2">
+            {[0, 1].map((item) => (
+              <div className="space-y-2 rounded-2xl border border-line bg-[#fbfdfc] p-3" key={item}>
+                <Skeleton className="h-4 w-2/3" />
+                <Skeleton className="h-3 w-full" />
+                <Skeleton className="h-3 w-1/2" />
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </SkeletonGroup>
   );
 }
 

@@ -2,7 +2,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Clock3, FileText, Info, ShieldCheck, Upload } from "lucide-react";
+import { AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Clock3, FileText, Info, LoaderCircle, ShieldCheck, Upload } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { useForm, useWatch } from "react-hook-form";
@@ -87,20 +87,22 @@ export function CivicReportForm() {
       kind,
     }));
     let reportId: string;
+    let writeToken: string | undefined;
     try {
       const response = await fetch("/api/reports", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ report: { ...values, incidentLocation: selectedLocation, attachments } }),
       });
-      const result = await response.json() as { reportId?: string; error?: string };
+      const result = await response.json() as { reportId?: string; writeToken?: string; error?: string };
       if (!response.ok || !result.reportId) throw new Error(result.error ?? "The report could not be saved.");
       reportId = result.reportId;
+      writeToken = result.writeToken;
     } catch (error) {
       setSubmissionError(error instanceof Error ? error.message : "The report could not be saved. Please try again.");
       return;
     }
-    const report = saveLocalReport({ ...values, id: reportId, incidentLocation: selectedLocation, attachments });
+    const report = saveLocalReport({ ...values, id: reportId, incidentLocation: selectedLocation, attachments, writeToken });
     try {
       await saveLocalAttachments(report.id, media.map(({ file }) => file), attachments);
     } catch {
@@ -171,7 +173,7 @@ export function CivicReportForm() {
 
             <div className="flex flex-col gap-4 border-t border-line pt-6 sm:flex-row sm:items-center sm:justify-between">
               <p className="flex gap-2 text-sm leading-6 text-muted"><Info aria-hidden="true" className="mt-1 shrink-0 text-brand" size={16} /> The report is saved for public status tracking; evidence stays on this device for now. Do not include private IDs or personal contact details.</p>
-              <Button className="shrink-0" disabled={isSubmitting} size="lg" type="submit"><FileText aria-hidden="true" size={18} /> Analyze and prepare report</Button>
+              <Button className="shrink-0" disabled={isSubmitting} size="lg" type="submit">{isSubmitting ? <LoaderCircle aria-hidden="true" className="animate-spin" size={18} /> : <FileText aria-hidden="true" size={18} />} {isSubmitting ? "Saving your report…" : "Analyze and prepare report"}</Button>
             </div>
             {submissionError ? <p className="rounded-xl border border-[#efbdb6] bg-[#fff4f1] px-4 py-3 text-sm font-medium text-danger" role="alert">{submissionError}</p> : null}
           </form>

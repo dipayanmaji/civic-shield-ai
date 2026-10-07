@@ -1,3 +1,4 @@
+import { headerValue } from "@/lib/email/mime";
 import { getOwnerGmailAccessToken } from "@/lib/gmail/access-token";
 
 const defaultRecipients = ["thedipayanmaji@gmail.com", "kushalkg0000@gmail.com"];
@@ -17,7 +18,7 @@ export async function sendTeamNotification(input: { subject: string; body: strin
 
   const raw = Buffer.from([
     `To: ${getTeamNotificationRecipients().join(", ")}`,
-    `Subject: ${input.subject}`,
+    `Subject: ${headerValue(input.subject)}`,
     "MIME-Version: 1.0",
     "Content-Type: text/plain; charset=UTF-8",
     "",

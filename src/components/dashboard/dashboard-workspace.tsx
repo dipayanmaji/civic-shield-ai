@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton, SkeletonGroup } from "@/components/ui/skeleton";
 import { LocationSafetySnapshot } from "@/components/landing/location-safety-snapshot";
 import type { PublicCivicReport, ReportStatus } from "@/types/report";
 
@@ -133,7 +134,7 @@ export function DashboardWorkspace() {
         {status === "blocked" ? (
           <EmptyState title="Location needed" detail={message} action={<Button onClick={requestLocation}><Crosshair aria-hidden="true" size={16} /> Use current location</Button>} />
         ) : status === "requesting" || status === "loading" ? (
-          <EmptyState title={status === "requesting" ? "Requesting location" : "Loading nearby complaints"} detail="CivicShield uses your location only to scope this public dashboard." />
+          <DashboardSkeleton waitingForLocation={status === "requesting"} />
         ) : status === "error" ? (
           <EmptyState title="Dashboard unavailable" detail={message} />
         ) : reports.length === 0 ? (
@@ -153,6 +154,40 @@ export function DashboardWorkspace() {
         )}
       </div>
     </main>
+  );
+}
+
+// Same shape as the loaded dashboard (three metrics, then the list) so nothing jumps when data arrives.
+function DashboardSkeleton({ waitingForLocation }: { waitingForLocation: boolean }) {
+  return (
+    <SkeletonGroup className="mt-8" label={waitingForLocation ? "Waiting for location permission" : "Loading nearby complaints"}>
+      <div className="grid gap-4 sm:grid-cols-3">
+        {[0, 1, 2].map((item) => (
+          <Card className="rounded-2xl" key={item}>
+            <CardContent className="flex items-center gap-3 p-5">
+              <Skeleton className="size-10 shrink-0 rounded-xl" />
+              <div className="flex-1 space-y-2"><Skeleton className="h-3 w-24" /><Skeleton className="h-6 w-12" /></div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      <section className="mt-7 overflow-hidden rounded-3xl border border-line bg-surface">
+        <div className="border-b border-line px-5 py-4 sm:px-6"><Skeleton className="h-6 w-56" /></div>
+        <div className="divide-y divide-line">
+          {[0, 1, 2, 3].map((item) => (
+            <div className="grid gap-4 p-5 sm:grid-cols-[1fr_auto] sm:items-center sm:px-6" key={item}>
+              <div className="space-y-3">
+                <div className="flex gap-2"><Skeleton className="h-4 w-28" /><Skeleton className="h-5 w-20 rounded-full" /></div>
+                <Skeleton className="h-6 w-48 max-w-full" />
+                <Skeleton className="h-4 w-2/3" />
+              </div>
+              <div className="space-y-2"><Skeleton className="h-4 w-36" /><Skeleton className="h-3 w-28" /></div>
+            </div>
+          ))}
+        </div>
+      </section>
+      {waitingForLocation ? <p className="mt-4 text-center text-xs font-medium text-muted">Waiting for location permission. CivicShield uses your location only to scope this public dashboard.</p> : null}
+    </SkeletonGroup>
   );
 }
 

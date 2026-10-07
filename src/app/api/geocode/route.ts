@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
 
+import { parseLatitude, parseLongitude } from "@/lib/geo/coordinates";
+import { allowRequest, rateLimitedResponse } from "@/lib/security/rate-limit";
+
+const MAX_QUERY_LENGTH = 200;
+
+type Coordinates = { latitude: number; longitude: number };
+
 type LocationResult = {
   label: string;
   latitude: number;
@@ -7,23 +14,29 @@ type LocationResult = {
 };
 
 export async function GET(request: Request) {
+  // Every call can reach Google (billed) or Nominatim (which bans heavy shared-IP use). The
+  // location search is debounced to under two requests a second, so this leaves normal typing alone.
+  const rate = allowRequest(request, "geocode", 60);
+  if (!rate.allowed) return rateLimitedResponse(rate.retryAfterSeconds);
+
   const url = new URL(request.url);
   const query = url.searchParams.get("q")?.trim();
-  const latitude = url.searchParams.get("lat");
-  const longitude = url.searchParams.get("lon");
-  if ((!query || query.length < 3) && (!latitude || !longitude)) return NextResponse.json({ error: "Enter a location search or valid coordinates." }, { status: 400 });
+  const latitude = parseLatitude(url.searchParams.get("lat"));
+  const longitude = parseLongitude(url.searchParams.get("lon"));
+  const coordinates = latitude !== null && longitude !== null ? { latitude, longitude } : null;
+  if (!coordinates && (!query || query.length < 3 || query.length > MAX_QUERY_LENGTH)) return NextResponse.json({ error: "Enter a location search or valid coordinates." }, { status: 400 });
 
   const googleKey = process.env.GOOGLE_MAPS_API_KEY;
   if (googleKey) {
-    const googleResult = latitude && longitude
-      ? await reverseGeocodeWithGoogle({ latitude, longitude, googleKey })
+    const googleResult = coordinates
+      ? await reverseGeocodeWithGoogle({ ...coordinates, googleKey })
       : await searchWithGoogle({ query: query ?? "", googleKey });
     if (googleResult) return NextResponse.json(googleResult);
   }
 
   try {
-    const endpoint = latitude && longitude
-      ? `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&lat=${encodeURIComponent(latitude)}&lon=${encodeURIComponent(longitude)}`
+    const endpoint = coordinates
+      ? `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&lat=${coordinates.latitude}&lon=${coordinates.longitude}`
       : `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&q=${encodeURIComponent(query ?? "")}`;
     const response = await fetch(endpoint, {
       headers: { "User-Agent": "CivicShieldAI-Hackathon/0.1 (contact: project-demo)" },
@@ -82,9 +95,7 @@ async function reverseGeocodeWithGoogle({
   latitude,
   longitude,
   googleKey,
-}: {
-  latitude: string;
-  longitude: string;
+}: Coordinates & {
   googleKey: string;
 }) {
   try {

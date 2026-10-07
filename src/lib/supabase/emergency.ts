@@ -54,7 +54,7 @@ export async function getEmergencyReports(options: { latitude?: number; longitud
     details: report.details,
     isSafe: report.is_safe,
     createdAt: report.created_at,
-    distanceMeters: options.latitude && options.longitude && report.latitude && report.longitude
+    distanceMeters: options.latitude !== undefined && options.longitude !== undefined && report.latitude !== null && report.longitude !== null
       ? getDistanceMeters(options.latitude, options.longitude, report.latitude, report.longitude)
       : undefined,
   })).filter((report) => isWithinLast24Hours(report.createdAt));

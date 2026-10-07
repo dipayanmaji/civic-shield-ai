@@ -6,9 +6,13 @@ import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton, SkeletonGroup } from "@/components/ui/skeleton";
 import type { EmergencyReport, PublicCivicReport } from "@/types/report";
 
 type Coordinates = { latitude: number; longitude: number };
+// locating: waiting for the browser's location answer; loading: fetching what is nearby;
+// unavailable: no location (denied / unsupported); error: nearby data could not be fetched.
+type Phase = "locating" | "loading" | "ready" | "unavailable" | "error";
 
 const VISIT_STORAGE_KEY = "civicshield:visited-places";
 
@@ -18,9 +22,14 @@ export function LocationSafetySnapshot({ compact = false }: { compact?: boolean 
   const [visitCount, setVisitCount] = useState(0);
   const [civicReports, setCivicReports] = useState<PublicCivicReport[]>([]);
   const [emergencyReports, setEmergencyReports] = useState<EmergencyReport[]>([]);
+  const [phase, setPhase] = useState<Phase>("locating");
+  const [labelSettled, setLabelSettled] = useState(false);
 
   useEffect(() => {
-    if (!navigator.geolocation) return;
+    if (!navigator.geolocation) {
+      queueMicrotask(() => setPhase("unavailable"));
+      return;
+    }
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
@@ -30,8 +39,9 @@ export function LocationSafetySnapshot({ compact = false }: { compact?: boolean 
         };
         setCoordinates(nextCoordinates);
         setVisitCount(trackVisit(nextCoordinates));
+        setPhase("loading");
       },
-      () => undefined,
+      () => setPhase("unavailable"),
       { enableHighAccuracy: true, maximumAge: 120000, timeout: 8000 },
     );
   }, []);
@@ -48,6 +58,8 @@ export function LocationSafetySnapshot({ compact = false }: { compact?: boolean 
         if (response.ok && payload.label) setLocationLabel(payload.label);
       } catch {
         setLocationLabel("");
+      } finally {
+        if (!controller.signal.aborted) setLabelSettled(true);
       }
     }
 
@@ -66,11 +78,16 @@ export function LocationSafetySnapshot({ compact = false }: { compact?: boolean 
           fetch(`/api/public-reports?lat=${currentCoordinates.latitude}&lon=${currentCoordinates.longitude}&radiusKm=5`, { signal: controller.signal }),
           fetch(`/api/emergency-reports?lat=${currentCoordinates.latitude}&lon=${currentCoordinates.longitude}&radiusKm=5`, { signal: controller.signal }),
         ]);
+        if (!civicResponse.ok || !emergencyResponse.ok) throw new Error("Nearby signals could not be loaded.");
         const civicPayload = await civicResponse.json() as { reports?: PublicCivicReport[] };
         const emergencyPayload = await emergencyResponse.json() as { reports?: EmergencyReport[] };
         setCivicReports(filterLast24Hours(civicPayload.reports ?? []));
         setEmergencyReports(filterLast24Hours(emergencyPayload.reports ?? []));
-      } catch {}
+        setPhase("ready");
+      } catch {
+        // A failed lookup must not read as "all clear".
+        if (!controller.signal.aborted) setPhase("error");
+      }
     }
 
     loadNearbySignals();
@@ -78,6 +95,8 @@ export function LocationSafetySnapshot({ compact = false }: { compact?: boolean 
   }, [coordinates]);
 
   const totalSignals = civicReports.length + emergencyReports.length;
+  const loadingSignals = phase === "locating" || phase === "loading";
+  const labelPending = phase === "locating" || (Boolean(coordinates) && !labelSettled);
   const locationName = locationLabel || (coordinates ? "Current detected location" : "Location check needed");
   const womenSignals = emergencyReports.filter((report) => report.type.toLowerCase().includes("women"));
   const safetyTone = totalSignals > 0 ? "caution" : "safe";
@@ -91,13 +110,17 @@ export function LocationSafetySnapshot({ compact = false }: { compact?: boolean 
             <p className="eyebrow">Live place safety</p>
             <h2 className="mt-2 font-display text-2xl font-bold tracking-tight">CivicShield around you</h2>
           </div>
-          <Badge tone={safetyTone}>{totalSignals ? `${totalSignals} recent` : "Clear"}</Badge>
+          {loadingSignals ? <Skeleton className="h-7 w-20 rounded-full" /> : phase === "ready" ? <Badge tone={safetyTone}>{totalSignals ? `${totalSignals} recent` : "Clear"}</Badge> : <Badge>{phase === "unavailable" ? "Location off" : "Unavailable"}</Badge>}
         </div>
         <div className="relative mt-4 rounded-2xl border border-line bg-white p-4">
-          <p className="flex items-start gap-2 text-sm font-bold leading-6 text-ink">
-            <MapPin aria-hidden="true" className="mt-0.5 shrink-0 text-brand" size={16} />
-            {locationName}
-          </p>
+          {labelPending ? (
+            <SkeletonGroup label="Finding your area"><Skeleton className="my-1 h-4 w-3/4" /></SkeletonGroup>
+          ) : (
+            <p className="flex items-start gap-2 text-sm font-bold leading-6 text-ink">
+              <MapPin aria-hidden="true" className="mt-0.5 shrink-0 text-brand" size={16} />
+              {locationName}
+            </p>
+          )}
           {coordinates ? (
             <p className="mt-1 text-xs text-muted">{visitCount > 1 ? `Visited ${visitCount} times from this browser` : "First detected visit from this browser"}</p>
           ) : null}
@@ -106,12 +129,26 @@ export function LocationSafetySnapshot({ compact = false }: { compact?: boolean 
 
       <div className={compact ? "relative mt-5 space-y-4" : "relative space-y-5 p-6"}>
         <div className="grid grid-cols-3 gap-2 sm:gap-3">
-          <SignalTile icon={<AlertTriangle aria-hidden="true" size={16} />} label="Civic complaints" value={civicReports.length} />
-          <SignalTile icon={<BellRing aria-hidden="true" size={16} />} label="Emergencies" value={emergencyReports.length} />
-          <SignalTile icon={<Venus aria-hidden="true" size={16} />} label="Women safety" value={womenSignals.length} />
+          <SignalTile icon={<AlertTriangle aria-hidden="true" size={16} />} label="Civic complaints" loading={loadingSignals} value={phase === "ready" ? civicReports.length : null} />
+          <SignalTile icon={<BellRing aria-hidden="true" size={16} />} label="Emergencies" loading={loadingSignals} value={phase === "ready" ? emergencyReports.length : null} />
+          <SignalTile icon={<Venus aria-hidden="true" size={16} />} label="Women safety" loading={loadingSignals} value={phase === "ready" ? womenSignals.length : null} />
         </div>
 
-        {totalSignals ? (
+        {loadingSignals ? (
+          <SkeletonGroup className="space-y-3" label="Checking what has been reported nearby">
+            {[0, 1].map((item) => <SignalRowSkeleton key={item} />)}
+          </SkeletonGroup>
+        ) : phase === "unavailable" ? (
+          <div className="rounded-2xl border border-line bg-[#fbfdfc] p-4 text-sm leading-6 text-muted">
+            <p className="font-bold text-ink">Turn on location to see your area.</p>
+            <p className="mt-1">Allow location in your browser to see what has been reported near you. You can still report an issue or get emergency help below.</p>
+          </div>
+        ) : phase === "error" ? (
+          <div className="rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-4 text-sm leading-6 text-[#725019]">
+            <p className="font-bold">Nearby reports could not be loaded.</p>
+            <p className="mt-1">This is not an all-clear. Please try again in a moment, and call 112 if you are in danger.</p>
+          </div>
+        ) : totalSignals ? (
           <div className="max-h-52 space-y-3 overflow-y-auto pr-1">
             {emergencyReports.slice(0, 3).map((report) => <SignalRow key={report.id} title={report.type} detail={report.locationLabel} time={report.createdAt} tone="danger" />)}
             {civicReports.slice(0, 3).map((report) => <SignalRow key={report.id} title={report.category ?? "Civic complaint"} detail={report.locationLabel} time={report.createdAt} tone="brand" />)}
@@ -136,11 +173,25 @@ export function LocationSafetySnapshot({ compact = false }: { compact?: boolean 
   );
 }
 
-function SignalTile({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
+function SignalTile({ icon, label, loading, value }: { icon: React.ReactNode; label: string; loading: boolean; value: number | null }) {
   return (
     <div className="rounded-xl border border-line bg-[#fbfdfc] p-2.5 sm:rounded-2xl sm:p-3">
       <div className="flex items-start gap-1.5 text-brand sm:gap-2">{icon}<p className="min-h-8 text-[0.58rem] font-bold uppercase leading-4 tracking-[0.08em] text-muted sm:text-[0.65rem] sm:tracking-[0.1em]">{label}</p></div>
-      <p className="mt-1.5 font-display text-xl font-bold sm:mt-2 sm:text-2xl">{value}</p>
+      {loading ? <Skeleton className="mt-2 h-7 w-9 sm:mt-2.5" /> : <p className="mt-1.5 font-display text-xl font-bold sm:mt-2 sm:text-2xl">{value ?? "–"}</p>}
+    </div>
+  );
+}
+
+function SignalRowSkeleton() {
+  return (
+    <div className="rounded-2xl border border-line bg-[#fbfdfc] p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1 space-y-2">
+          <Skeleton className="h-4 w-1/2" />
+          <Skeleton className="h-3 w-5/6" />
+        </div>
+        <Skeleton className="h-6 w-9 rounded-full" />
+      </div>
     </div>
   );
 }

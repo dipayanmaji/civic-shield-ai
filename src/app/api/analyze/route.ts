@@ -1,12 +1,23 @@
 import { NextResponse } from "next/server";
 
 import { createFallbackAnalysis, createStructuredEmailDraft } from "@/lib/ai/fallback-analysis";
+import { allowRequest, rateLimitedResponse } from "@/lib/security/rate-limit";
 import type { CivicReport, SafetyAnalysis } from "@/types/report";
 
+// A real report is a few KB (the form caps each field); this only stops oversized prompts.
+const MAX_REPORT_CHARS = 10_000;
+
 export async function POST(request: Request) {
-  const body = (await request.json()) as { report?: CivicReport; variation?: number };
-  if (!body.report) {
+  // Each call can spend Groq quota. A citizen needs one analysis plus a few regenerations.
+  const rate = allowRequest(request, "analyze", 15, 10 * 60_000);
+  if (!rate.allowed) return rateLimitedResponse(rate.retryAfterSeconds);
+
+  const body = await request.json().catch(() => null) as { report?: CivicReport; variation?: number } | null;
+  if (!body?.report) {
     return NextResponse.json({ error: "A report is required." }, { status: 400 });
+  }
+  if (JSON.stringify(body.report).length > MAX_REPORT_CHARS) {
+    return NextResponse.json({ error: "This report is too long to analyze." }, { status: 413 });
   }
 
   const fallback = createFallbackAnalysis(body.report, body.variation);

@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 
+import { parseLatitude, parseLongitude } from "@/lib/geo/coordinates";
+import { allowRequest, rateLimitedResponse } from "@/lib/security/rate-limit";
+
+const MAX_ROUTE_NAME_LENGTH = 100;
+
 const categoryQueries: Record<string, string> = {
   "Electrical safety": "electricity office municipal electrical maintenance",
   "Sanitation and waste": "municipal sanitation office solid waste department",
@@ -19,13 +24,17 @@ type DepartmentPlace = {
 };
 
 export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const lat = Number(url.searchParams.get("lat"));
-  const lon = Number(url.searchParams.get("lon"));
-  const category = url.searchParams.get("category")?.trim() || "General civic issue";
-  const routeName = url.searchParams.get("route")?.trim();
+  // One call per analysis page, and each one is a billed Google Places search.
+  const rate = allowRequest(request, "department-nearby", 12);
+  if (!rate.allowed) return rateLimitedResponse(rate.retryAfterSeconds);
 
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+  const url = new URL(request.url);
+  const lat = parseLatitude(url.searchParams.get("lat"));
+  const lon = parseLongitude(url.searchParams.get("lon"));
+  const category = url.searchParams.get("category")?.trim() || "General civic issue";
+  const routeName = url.searchParams.get("route")?.trim().slice(0, MAX_ROUTE_NAME_LENGTH);
+
+  if (lat === null || lon === null) {
     return NextResponse.json({ error: "Valid coordinates are required." }, { status: 400 });
   }
 
@@ -34,7 +43,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ departments: [], provider: "missing-google-key" });
   }
 
-  const queryBase = categoryQueries[category] ?? categoryQueries["General civic issue"];
+  const queryBase = Object.hasOwn(categoryQueries, category) ? categoryQueries[category] : categoryQueries["General civic issue"];
   const textQuery = `${routeName || queryBase} ${queryBase} near ${lat},${lon}`;
 
   try {
@@ -75,7 +84,7 @@ export async function GET(request: Request) {
       address: place.formattedAddress ?? "Address not available",
       phone: place.nationalPhoneNumber ?? place.internationalPhoneNumber,
       mapsUrl: place.googleMapsUri,
-      distanceMeters: place.location?.latitude && place.location.longitude ? getDistanceMeters(lat, lon, place.location.latitude, place.location.longitude) : undefined,
+      distanceMeters: typeof place.location?.latitude === "number" && typeof place.location.longitude === "number" ? getDistanceMeters(lat, lon, place.location.latitude, place.location.longitude) : undefined,
       source: "google",
     }));
 

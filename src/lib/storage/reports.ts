@@ -85,6 +85,7 @@ export function saveLocalReport(input: CivicReportInput) {
     affectedPeople: input.affectedPeople?.trim() || undefined,
     extraDetails: input.extraDetails?.trim() || undefined,
     attachments: input.attachments,
+    writeToken: input.writeToken,
     status: "ready-to-analyze",
     createdAt: now,
     updatedAt: now,

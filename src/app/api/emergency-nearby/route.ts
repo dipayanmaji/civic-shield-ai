@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 
+import { parseLatitude, parseLongitude } from "@/lib/geo/coordinates";
+import { allowRequest, rateLimitedResponse } from "@/lib/security/rate-limit";
+
 type NearbyKind = "police" | "hospital" | "ambulance" | "fire" | "safe-place";
 
 type NearbyPlace = {
@@ -34,13 +37,23 @@ const overpassQueries: Record<NearbyKind, string[]> = {
   ],
 };
 
-export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const lat = Number(url.searchParams.get("lat"));
-  const lon = Number(url.searchParams.get("lon"));
-  const kind = url.searchParams.get("kind") as NearbyKind | null;
+// Own-property check: `"constructor" in googleQueries` is true and would pass a plain `in` test.
+function isNearbyKind(value: string | null): value is NearbyKind {
+  return value !== null && Object.hasOwn(googleQueries, value);
+}
 
-  if (!Number.isFinite(lat) || !Number.isFinite(lon) || !kind || !(kind in googleQueries)) {
+export async function GET(request: Request) {
+  // Each call can reach Google Places (billed) and Overpass. The emergency page makes one call per
+  // kind (5) on load, so this allows several page loads a minute.
+  const rate = allowRequest(request, "emergency-nearby", 30);
+  if (!rate.allowed) return rateLimitedResponse(rate.retryAfterSeconds);
+
+  const url = new URL(request.url);
+  const lat = parseLatitude(url.searchParams.get("lat"));
+  const lon = parseLongitude(url.searchParams.get("lon"));
+  const kind = url.searchParams.get("kind");
+
+  if (lat === null || lon === null || !isNearbyKind(kind)) {
     return NextResponse.json({ error: "Valid latitude, longitude, and nearby kind are required." }, { status: 400 });
   }
 
@@ -118,7 +131,7 @@ async function fetchGooglePlaces({
         address: place.formattedAddress ?? details?.formattedAddress ?? "Address not available",
         phone: normalisePhone(place.nationalPhoneNumber ?? place.internationalPhoneNumber ?? details?.nationalPhoneNumber ?? details?.internationalPhoneNumber),
         mapsUrl: place.googleMapsUri ?? details?.googleMapsUri,
-        distanceMeters: placeLatitude && placeLongitude ? getDistanceMeters(lat, lon, placeLatitude, placeLongitude) : undefined,
+        distanceMeters: typeof placeLatitude === "number" && typeof placeLongitude === "number" ? getDistanceMeters(lat, lon, placeLatitude, placeLongitude) : undefined,
         source: "google" as const,
       };
     }));
@@ -197,8 +210,8 @@ async function fetchOpenStreetMapPlaces({ kind, lat, lon }: { kind: NearbyKind; 
           name: element.tags?.name ?? readableKind(kind),
           address: buildOsmAddress(element.tags),
           phone: element.tags?.phone ?? element.tags?.["contact:phone"],
-          mapsUrl: placeLat && placeLon ? `https://www.google.com/maps/search/?api=1&query=${placeLat},${placeLon}` : undefined,
-          distanceMeters: placeLat && placeLon ? getDistanceMeters(lat, lon, placeLat, placeLon) : undefined,
+          mapsUrl: typeof placeLat === "number" && typeof placeLon === "number" ? `https://www.google.com/maps/search/?api=1&query=${placeLat},${placeLon}` : undefined,
+          distanceMeters: typeof placeLat === "number" && typeof placeLon === "number" ? getDistanceMeters(lat, lon, placeLat, placeLon) : undefined,
           source: "openstreetmap" as const,
         };
       })

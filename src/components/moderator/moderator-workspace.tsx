@@ -2,10 +2,11 @@
 
 import { Building2, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, Eye, Filter, MapPin, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, Trash2, Venus, X } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { createContext, useContext, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton, SkeletonGroup } from "@/components/ui/skeleton";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CivicSenseStatus, CivicSenseSubmission, EmergencyReport, ReportStatus, UrgencyLevel } from "@/types/report";
 
@@ -29,6 +30,10 @@ type PresetRange = "all" | "7" | "14" | "30" | "custom";
 type Tab = "civic" | "emergency" | "civic-sense";
 type ModeratorNotice = { id: number; message: string; tone: "success" | "error"; actionHref?: string; actionLabel?: string };
 
+// Whether the lists are still loading and whether a moderator action (status change, sign-in) is in flight.
+// A context keeps this out of the long prop lists of the list/detail components.
+const ModeratorActivityContext = createContext({ loading: false, busy: false });
+
 const statuses: ReportStatus[] = ["acknowledged", "assigned", "in-progress", "department-resolved", "verification-pending", "verified-resolved", "disputed", "reopened", "overdue"];
 
 export function ModeratorWorkspace() {
@@ -51,6 +56,7 @@ export function ModeratorWorkspace() {
   const [civicSenseSelection, setCivicSenseSelection] = useState<string[]>([]);
   const [deleteRequest, setDeleteRequest] = useState<{ kind: "civic" | "emergency" | "civic-sense"; ids: string[] } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   function notify(message: string, tone: ModeratorNotice["tone"] = "success", action?: Pick<ModeratorNotice, "actionHref" | "actionLabel">) {
     const id = Date.now() + Math.floor(Math.random() * 1000);
@@ -95,6 +101,8 @@ export function ModeratorWorkspace() {
   }
 
   async function login() {
+    if (busy) return;
+    setBusy(true);
     try {
       const response = await fetch("/api/moderator/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accessKey }) });
       const payload = await response.json() as { error?: string };
@@ -105,11 +113,14 @@ export function ModeratorWorkspace() {
       await loadReports();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Could not sign in.", "error");
+    } finally {
+      setBusy(false);
     }
   }
 
   async function publishStatus(ids: string[], nextStatus: ReportStatus, nextNote: string) {
-    if (!ids.length) return;
+    if (!ids.length || busy) return;
+    setBusy(true);
     try {
       await Promise.all(ids.map(async (reportId) => {
         const response = await fetch(`/api/moderator/reports/${encodeURIComponent(reportId)}/status`, {
@@ -124,10 +135,14 @@ export function ModeratorWorkspace() {
       await loadReports();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Status update failed.", "error");
+    } finally {
+      setBusy(false);
     }
   }
 
   async function updateCivicSenseSubmissionStatus(submissionId: string, nextStatus: CivicSenseStatus) {
+    if (busy) return;
+    setBusy(true);
     try {
       const response = await fetch(`/api/moderator/civic-sense/${encodeURIComponent(submissionId)}/status`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: nextStatus }),
@@ -138,6 +153,8 @@ export function ModeratorWorkspace() {
       await loadReports();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Civic Sense status update failed.", "error");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -190,7 +207,7 @@ export function ModeratorWorkspace() {
     setNote("");
   }
 
-  return <>
+  return <ModeratorActivityContext.Provider value={{ loading, busy }}>
     <main className="min-h-screen bg-canvas p-6 text-ink sm:p-10">
       <div className="mx-auto max-w-7xl">
         <Link className="inline-flex items-center gap-2 rounded-xl border border-line bg-white px-3 py-2 text-sm font-bold text-brand transition hover:bg-brand-soft" href="/">
@@ -230,14 +247,26 @@ export function ModeratorWorkspace() {
     </main>
     {deleteRequest ? <DeleteDialog kind={deleteRequest.kind} reportCount={deleteRequest.ids.length} deleting={deleting} onCancel={() => setDeleteRequest(null)} onDelete={() => void confirmDelete()} /> : null}
     <ModeratorNoticeViewport notices={notices} onDismiss={(id) => setNotices((current) => current.filter((notice) => notice.id !== id))} />
-  </>;
+  </ModeratorActivityContext.Provider>;
+}
+
+// Placeholder rows for the moderation lists while the first load runs (same shape as a real row).
+function ModeratorListSkeleton() {
+  return <SkeletonGroup className="space-y-2" label="Loading the moderation list">
+    {[0, 1, 2, 3].map((item) => <div className="flex gap-3 rounded-2xl border border-line bg-[#fbfdfc] p-3" key={item}>
+      <Skeleton className="mt-1 size-4 shrink-0 rounded" />
+      <div className="min-w-0 flex-1 space-y-2"><div className="flex items-center justify-between gap-3"><Skeleton className="h-4 w-28" /><Skeleton className="h-5 w-16 rounded-full" /></div><Skeleton className="h-4 w-2/3" /><Skeleton className="h-3 w-full" /></div>
+    </div>)}
+  </SkeletonGroup>;
 }
 
 function LoginCard({ accessKey, onChange, onLogin }: { accessKey: string; onChange: (value: string) => void; onLogin: () => void }) {
-  return <Card className="mt-6 max-w-xl rounded-3xl"><CardContent className="p-6"><div className="rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-4 text-sm leading-6 text-[#725019]"><p className="font-bold text-[#573a0c]">Internal team access only</p><p className="mt-1">This sign-in is for CivicShield moderators reviewing reports, emergency records, and social-awareness posts. Public users do not need moderator access.</p></div><p className="mt-5 text-sm leading-6 text-muted">Sign in with the server-configured moderator access key.</p><input className="mt-4 h-12 w-full rounded-xl border border-line px-3" type="password" value={accessKey} onChange={(event) => onChange(event.target.value)} placeholder="Moderator access key: 1234" /><Button className="mt-3" onClick={onLogin}>Sign in</Button></CardContent></Card>;
+  const { busy } = useContext(ModeratorActivityContext);
+  return <Card className="mt-6 max-w-xl rounded-3xl"><CardContent className="p-6"><div className="rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-4 text-sm leading-6 text-[#725019]"><p className="font-bold text-[#573a0c]">Internal team access only</p><p className="mt-1">This sign-in is for CivicShield moderators reviewing reports, emergency records, and social-awareness posts. Public users do not need moderator access.</p></div><p className="mt-5 text-sm leading-6 text-muted">Sign in with the server-configured moderator access key.</p><input className="mt-4 h-12 w-full rounded-xl border border-line px-3" type="password" value={accessKey} onChange={(event) => onChange(event.target.value)} placeholder="Moderator access key: 1234" /><Button className="mt-3" disabled={busy} onClick={onLogin}>{busy ? "Signing in…" : "Sign in"}</Button></CardContent></Card>;
 }
 
 function CivicSenseModeration({ instagramConnection, selected, selectedIds, submissions, onDelete, onNotice, onPublish, onSelect, onSelectionChange, onStatusChange }: { instagramConnection: InstagramConnectionStatus | null; selected: CivicSenseSubmission | null; selectedIds: string[]; submissions: CivicSenseSubmission[]; onDelete: (ids: string[]) => void; onNotice: (message: string, tone?: ModeratorNotice["tone"]) => void; onPublish: (submissionId: string) => Promise<{ instagramMediaId?: string; postUrl?: string | null }>; onSelect: (submission: CivicSenseSubmission) => void; onSelectionChange: (ids: string[]) => void; onStatusChange: (submissionId: string, status: CivicSenseStatus) => void }) {
+  const { loading } = useContext(ModeratorActivityContext);
   const [statusFilter, setStatusFilter] = useState<"all" | "needs-review" | "approved">("all");
   const needsReview = submissions.filter((submission) => submission.status === "needs-review").length;
   const approved = submissions.filter((submission) => submission.status === "approved").length;
@@ -255,7 +284,7 @@ function CivicSenseModeration({ instagramConnection, selected, selectedIds, subm
       <div className="mt-5"><p className="font-display text-xl font-bold">Zero Civic Sense queue</p><p className="mt-1 text-sm text-muted">{statusFilter === "all" ? "Newest public-awareness submissions for Instagram review." : `${sorted.length} ${statusFilter === "needs-review" ? "post needs review" : "approved post"}${sorted.length === 1 ? "" : "s"} shown. Click the active summary card again to clear the filter.`}</p></div>
       {selectedIds.length ? <div className="mt-4 rounded-2xl border border-[#efc7bf] bg-[#fff8f6] p-3"><p className="text-sm font-bold text-danger">{selectedIds.length} Zero Civic Sense post{selectedIds.length === 1 ? "" : "s"} selected</p><div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="danger" onClick={() => onDelete(selectedIds)}><Trash2 size={14} /> Delete selected</Button><button className="text-xs font-bold text-danger underline underline-offset-4" type="button" onClick={() => onSelectionChange([])}>Clear selection</button></div></div> : null}
       <div className="mt-5 flex items-center justify-between gap-3"><label className="flex items-center gap-2 text-xs font-bold text-muted"><input className="size-4 accent-[#076b5a]" type="checkbox" checked={allVisibleSelected} onChange={toggleVisibleSelection} /> Select filtered</label></div>
-      <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">{sorted.length ? sorted.map((submission) => <article className={`flex gap-3 rounded-2xl border p-3 transition ${selected?.id === submission.id ? "border-brand bg-brand-soft" : "border-line bg-[#fbfdfc] hover:border-brand/40"}`} key={submission.id}><input aria-label={`Select ${submission.id}`} className="mt-1 size-4 shrink-0 accent-[#076b5a]" type="checkbox" checked={selectedIds.includes(submission.id)} onChange={() => toggleSelection(submission.id)} /><div className="min-w-0 flex-1"><button className="w-full text-left" type="button" onClick={() => onSelect(submission)}><div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold text-brand">{submission.id}</span><CivicSenseStatusBadge status={submission.status} /></div><p className="mt-2 text-sm font-bold">{submission.aiCategory || "Public civic sense"}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{submission.experience}</p><p className="mt-2 text-xs font-semibold text-muted">{submission.locationLabel || "Location not captured"} · {formatDate(submission.createdAt)}</p></button><div className="mt-3 flex justify-end"><Button size="sm" variant="danger" onClick={() => onDelete([submission.id])}><Trash2 size={14} /> Delete</Button></div></div></article>) : <p className="rounded-xl bg-[#fbfdfc] p-4 text-sm text-muted">No Zero Civic Sense posts match this summary filter.</p>}</div>
+      <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">{loading && submissions.length === 0 ? <ModeratorListSkeleton /> : sorted.length ? sorted.map((submission) => <article className={`flex gap-3 rounded-2xl border p-3 transition ${selected?.id === submission.id ? "border-brand bg-brand-soft" : "border-line bg-[#fbfdfc] hover:border-brand/40"}`} key={submission.id}><input aria-label={`Select ${submission.id}`} className="mt-1 size-4 shrink-0 accent-[#076b5a]" type="checkbox" checked={selectedIds.includes(submission.id)} onChange={() => toggleSelection(submission.id)} /><div className="min-w-0 flex-1"><button className="w-full text-left" type="button" onClick={() => onSelect(submission)}><div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold text-brand">{submission.id}</span><CivicSenseStatusBadge status={submission.status} /></div><p className="mt-2 text-sm font-bold">{submission.aiCategory || "Public civic sense"}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{submission.experience}</p><p className="mt-2 text-xs font-semibold text-muted">{submission.locationLabel || "Location not captured"} · {formatDate(submission.createdAt)}</p></button><div className="mt-3 flex justify-end"><Button size="sm" variant="danger" onClick={() => onDelete([submission.id])}><Trash2 size={14} /> Delete</Button></div></div></article>) : <p className="rounded-xl bg-[#fbfdfc] p-4 text-sm text-muted">No Zero Civic Sense posts match this summary filter.</p>}</div>
     </CardContent></Card>
     <Card className="rounded-3xl"><CardContent className="p-6 sm:p-7">{selected ? <CivicSenseDetail submission={selected} onNotice={onNotice} onPublish={onPublish} onStatusChange={onStatusChange} /> : <EmptyState icon={<Sparkles className="mx-auto text-brand" size={30} />} title="Select a Civic Sense post" detail="Review the citizen story, AI caption, hashtags, media summary, and posting status." />}</CardContent></Card>
   </div>;
@@ -270,6 +299,7 @@ function InstagramConnectionCard({ connection }: { connection: InstagramConnecti
 }
 
 function CivicSenseDetail({ submission, onNotice, onPublish, onStatusChange }: { submission: CivicSenseSubmission; onNotice: (message: string, tone?: ModeratorNotice["tone"]) => void; onPublish: (submissionId: string) => Promise<{ instagramMediaId?: string; postUrl?: string | null }>; onStatusChange: (submissionId: string, status: CivicSenseStatus) => void }) {
+  const { busy } = useContext(ModeratorActivityContext);
   const mapsUrl = mapsLink(submission.latitude, submission.longitude);
   const hasPublishableMedia = submission.mediaUrls.some((url, index) => {
     const type = submission.mediaTypes[index] ?? "";
@@ -300,10 +330,23 @@ function CivicSenseDetail({ submission, onNotice, onPublish, onStatusChange }: {
     {mapsUrl ? <MapLink href={mapsUrl} label="Open submission location" /> : null}
     <CivicSenseMediaReview submission={submission} />
     <div className="mt-6 rounded-2xl border border-[#cbe8dd] bg-[#effaf5] p-4"><p className="eyebrow">AI generated caption</p><p className="mt-3 text-sm leading-7">{submission.aiCaption}</p><div className="mt-4 flex flex-wrap gap-2">{submission.aiHashtags.map((tag) => <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-brand" key={tag}>{tag}</span>)}</div></div>
-    <div className="mt-6 flex flex-wrap gap-2 border-t border-line pt-6"><Button variant="outline" disabled={!hasPublishableMedia} onClick={() => { setPublishMessage(""); setReviewOpen(true); }}><Sparkles size={16} /> Approve for Instagram</Button><Button onClick={() => onStatusChange(submission.id, "posted")}><CheckCircle2 size={16} /> Mark posted</Button><Button variant="danger" onClick={() => onStatusChange(submission.id, "rejected")}><Trash2 size={16} /> Reject</Button></div>
+    <div className="mt-6 flex flex-wrap gap-2 border-t border-line pt-6"><Button variant="outline" disabled={!hasPublishableMedia} onClick={() => { setPublishMessage(""); setReviewOpen(true); }}><Sparkles size={16} /> Approve for Instagram</Button><Button disabled={busy} onClick={() => onStatusChange(submission.id, "posted")}><CheckCircle2 size={16} /> Mark posted</Button><Button variant="danger" disabled={busy} onClick={() => onStatusChange(submission.id, "rejected")}><Trash2 size={16} /> Reject</Button></div>
     <p className="mt-3 text-xs leading-5 text-muted">Every Civic Sense post needs a photo or video. One video publishes as a Reel, one photo publishes as an image post, and two uploaded files publish together as one Instagram carousel. Submissions without stored media cannot be published.</p>
     {reviewOpen ? <InstagramReviewDialog message={publishMessage} publishing={publishing} submission={submission} onCancel={() => setReviewOpen(false)} onProceed={() => void proceedToPublish()} /> : null}
   </>;
+}
+
+// Shows submitted media exactly as it was sent, never cropped. A vertical video sits in a fixed 9:16 frame
+// (letterboxed if the file is slightly off), and a photo keeps its own shape. The #t=0.1 start time makes
+// iOS Safari paint a first frame instead of a black box. The same view is used in
+// the review card and the publish dialog so the moderator sees one consistent frame.
+function ModeratorMedia({ alt, type, url }: { alt: string; type: string; url: string }) {
+  if (type.startsWith("video/")) {
+    return <div className="mx-auto aspect-[9/16] w-full max-w-[15rem] overflow-hidden rounded-2xl bg-black"><video className="size-full object-contain" controls playsInline preload="metadata" src={`${url}#t=0.1`} /></div>;
+  }
+  // A remote Supabase Storage URL; next/image would need the host configured and cannot show it uncropped here.
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img alt={alt} className="mx-auto max-h-[28rem] w-auto max-w-full rounded-2xl bg-[#f4f8f6] object-contain" src={url} />;
 }
 
 function CivicSenseMediaReview({ submission }: { submission: CivicSenseSubmission }) {
@@ -313,7 +356,7 @@ function CivicSenseMediaReview({ submission }: { submission: CivicSenseSubmissio
   }
   return <div className="mt-6 rounded-2xl border border-line bg-[#fbfdfc] p-4"><p className="eyebrow">Stored media preview</p><div className="mt-3 grid gap-3 sm:grid-cols-2">{submission.mediaUrls.map((url, index) => {
     const type = submission.mediaTypes[index] ?? "";
-    return <div className="rounded-2xl border border-line bg-white p-3" key={`${url}-${index}`}><p className="mb-2 truncate text-xs font-bold text-muted">{type || "media file"}</p>{type.startsWith("video/") ? <video className="aspect-video w-full rounded-xl bg-[#101a18] object-cover" controls src={url} /> : type.startsWith("image/") ? <img className="aspect-video w-full rounded-xl object-cover" src={url} alt="Civic Sense submission evidence" /> : <a className="text-sm font-bold text-brand underline underline-offset-4" href={url} target="_blank" rel="noreferrer">Open media</a>}</div>;
+    return <div className="rounded-2xl border border-line bg-white p-3" key={`${url}-${index}`}><p className="mb-2 truncate text-xs font-bold text-muted">{type || "media file"}</p>{type.startsWith("video/") || type.startsWith("image/") ? <ModeratorMedia alt="Civic Sense submission evidence" type={type} url={url} /> : <a className="text-sm font-bold text-brand underline underline-offset-4" href={url} target="_blank" rel="noreferrer">Open media</a>}</div>;
   })}</div></div>;
 }
 
@@ -334,7 +377,7 @@ function InstagramReviewDialog({ message, publishing, submission, onCancel, onPr
       <div className="mt-6 grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
         <div className="rounded-3xl border border-line bg-[#fbfdfc] p-4">
           <p className="text-xs font-bold uppercase tracking-[0.1em] text-muted">Media to publish</p>
-          {media.length ? <div className="mt-3 grid gap-3 sm:grid-cols-2">{media.map(({ url, type }, index) => type.startsWith("video/") ? <video className="aspect-[9/16] max-h-[28rem] w-full rounded-2xl bg-[#101a18] object-cover" controls key={`${url}-${index}`} src={url} /> : <img className="aspect-square max-h-[28rem] w-full rounded-2xl object-cover" key={`${url}-${index}`} src={url} alt={`Civic Sense photo ${index + 1}`} />)}</div> : <div className="mt-3 grid aspect-square place-items-center rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-6 text-center text-sm font-semibold text-[#725019]">A photo or video is required to publish this submission.</div>}
+          {media.length ? <div className="mt-3 grid gap-3 sm:grid-cols-2">{media.map(({ url, type }, index) => <ModeratorMedia alt={`Civic Sense photo ${index + 1}`} key={`${url}-${index}`} type={type} url={url} />)}</div> : <div className="mt-3 grid aspect-square place-items-center rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-6 text-center text-sm font-semibold text-[#725019]">A photo or video is required to publish this submission.</div>}
         </div>
         <div className="rounded-3xl border border-[#cbe8dd] bg-[#effaf5] p-4">
           <p className="text-xs font-bold uppercase tracking-[0.1em] text-brand">Caption</p>
@@ -349,6 +392,7 @@ function InstagramReviewDialog({ message, publishing, submission, onCancel, onPr
 }
 
 function EmergencyModeration({ reports, selected, selectedIds, onDelete, onSelect, onSelectionChange }: { reports: EmergencyReport[]; selected: EmergencyReport | null; selectedIds: string[]; onDelete: (ids: string[]) => void; onSelect: (report: EmergencyReport) => void; onSelectionChange: (ids: string[]) => void }) {
+  const { loading } = useContext(ModeratorActivityContext);
   const [city, setCity] = useState("all");
   const [summaryFilter, setSummaryFilter] = useState<"all" | "women" | "unsafe">("all");
   const cities = useMemo(() => citiesFor(reports), [reports]);
@@ -370,7 +414,7 @@ function EmergencyModeration({ reports, selected, selectedIds, onDelete, onSelec
       <div className="mt-5 flex flex-wrap items-end justify-between gap-3"><div><p className="font-display text-xl font-bold">Lodged emergency reports</p><p className="mt-1 text-sm text-muted">Newest first · {filtered.length} shown{summaryFilter !== "all" ? ". Click the active summary card again to clear the filter." : ""}</p></div><CitySelect cities={cities} value={city} onChange={setCity} /></div>
       {selectedIds.length ? <div className="mt-4 rounded-2xl border border-[#efc7bf] bg-[#fff8f6] p-3"><p className="text-sm font-bold text-danger">{selectedIds.length} emergency report{selectedIds.length === 1 ? "" : "s"} selected</p><div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="danger" onClick={() => onDelete(selectedIds)}><Trash2 size={14} /> Delete selected</Button><button className="text-xs font-bold text-danger underline underline-offset-4" type="button" onClick={() => onSelectionChange([])}>Clear selection</button></div></div> : null}
       <div className="mt-5 flex items-center justify-between gap-3"><label className="flex items-center gap-2 text-xs font-bold text-muted"><input className="size-4 accent-[#c73c31]" type="checkbox" checked={allFilteredSelected} onChange={toggleAll} /> Select filtered</label></div>
-      <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">{filtered.length ? filtered.map((report) => <article className={`flex gap-3 rounded-2xl border p-3 transition ${selected?.id === report.id ? "border-danger bg-[#fff4f1]" : "border-line bg-[#fbfdfc] hover:border-danger/40"}`} key={report.id}><input aria-label={`Select ${report.id}`} className="mt-1 size-4 shrink-0 accent-[#c73c31]" type="checkbox" checked={selectedIds.includes(report.id)} onChange={() => toggle(report.id)} /><button className="min-w-0 flex-1 text-left" type="button" onClick={() => onSelect(report)}><div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold text-danger">{report.id}</span><Badge tone={report.isSafe ? "safe" : "urgent"}>{report.isSafe ? "safe now" : "needs review"}</Badge></div><p className="mt-2 flex items-center gap-1.5 text-sm font-bold">{report.type.toLowerCase().includes("women") ? <Venus size={15} className="text-[#a22a58]" /> : <ShieldAlert size={15} className="text-danger" />}{report.type}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{report.locationLabel}</p><p className="mt-2 text-xs font-semibold text-muted">{formatDate(report.createdAt)}</p></button></article>) : <p className="rounded-xl bg-[#fbfdfc] p-4 text-sm text-muted">No emergency reports match this city.</p>}</div>
+      <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">{loading && reports.length === 0 ? <ModeratorListSkeleton /> : filtered.length ? filtered.map((report) => <article className={`flex gap-3 rounded-2xl border p-3 transition ${selected?.id === report.id ? "border-danger bg-[#fff4f1]" : "border-line bg-[#fbfdfc] hover:border-danger/40"}`} key={report.id}><input aria-label={`Select ${report.id}`} className="mt-1 size-4 shrink-0 accent-[#c73c31]" type="checkbox" checked={selectedIds.includes(report.id)} onChange={() => toggle(report.id)} /><button className="min-w-0 flex-1 text-left" type="button" onClick={() => onSelect(report)}><div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold text-danger">{report.id}</span><Badge tone={report.isSafe ? "safe" : "urgent"}>{report.isSafe ? "safe now" : "needs review"}</Badge></div><p className="mt-2 flex items-center gap-1.5 text-sm font-bold">{report.type.toLowerCase().includes("women") ? <Venus size={15} className="text-[#a22a58]" /> : <ShieldAlert size={15} className="text-danger" />}{report.type}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-muted">{report.locationLabel}</p><p className="mt-2 text-xs font-semibold text-muted">{formatDate(report.createdAt)}</p></button></article>) : <p className="rounded-xl bg-[#fbfdfc] p-4 text-sm text-muted">No emergency reports match this city.</p>}</div>
     </CardContent></Card>
     <Card className="rounded-3xl"><CardContent className="p-6 sm:p-7">{selected ? <EmergencyDetail report={selected} onDelete={() => onDelete([selected.id])} /> : <EmptyState icon={<ShieldAlert className="mx-auto text-danger" size={30} />} title="Select an emergency report" detail="Review location, details, and safety status from lodged emergency alerts." />}</CardContent></Card>
   </div>;
@@ -387,6 +431,7 @@ function EmergencyDetail({ report, onDelete }: { report: EmergencyReport; onDele
 }
 
 function CivicModeration({ reports, selected, selectedIds, status, note, onDelete, onBulkUpdate, onNoteChange, onSelect, onSelectionChange, onStatusChange, onUpdate }: { reports: ModeratorReport[]; selected: ModeratorReport | null; selectedIds: string[]; status: ReportStatus; note: string; onDelete: (ids: string[]) => void; onBulkUpdate: (status: ReportStatus, note: string) => void; onNoteChange: (note: string) => void; onSelect: (report: ModeratorReport) => void; onSelectionChange: (ids: string[]) => void; onStatusChange: (status: ReportStatus) => void; onUpdate: () => void }) {
+  const { loading } = useContext(ModeratorActivityContext);
   const [range, setRange] = useState<PresetRange>("all");
   const [city, setCity] = useState("all");
   const [fromDate, setFromDate] = useState("");
@@ -402,19 +447,21 @@ function CivicModeration({ reports, selected, selectedIds, status, note, onDelet
       <div className="mt-5 rounded-2xl border border-line bg-[#fbfdfc] p-3"><div className="flex items-center gap-2"><Filter size={16} className="text-brand" /><p className="text-sm font-bold">Filter reports</p></div><div className="mt-3 grid gap-2 sm:grid-cols-2"><label className="text-xs font-bold text-muted">Date range<select className="mt-1 h-10 w-full rounded-lg border border-line bg-white px-2 text-sm font-normal text-ink" value={range} onChange={(event) => setRange(event.target.value as PresetRange)}><option value="all">All time</option><option value="7">Past 7 days</option><option value="14">Past 2 weeks</option><option value="30">Past month</option><option value="custom">Custom range</option></select></label><CitySelect cities={cities} value={city} onChange={setCity} /></div>{range === "custom" ? <DateRangePicker fromDate={fromDate} toDate={toDate} onChange={({ fromDate: start, toDate: end }) => { setFromDate(start); setToDate(end); }} /> : null}</div>
       {selectedIds.length ? <BulkActions count={selectedIds.length} onDelete={() => onDelete(selectedIds)} onInProgress={() => onBulkUpdate("in-progress", "Moderator bulk update: investigation is in progress.")} onResolved={() => onBulkUpdate("department-resolved", "Moderator bulk update: department resolution recorded; community verification is pending.")} /> : null}
       <div className="mt-5 flex items-center justify-between gap-3"><label className="flex items-center gap-2 text-xs font-bold text-muted"><input className="size-4 accent-[#076b5a]" type="checkbox" checked={allFilteredSelected} onChange={toggleAll} /> Select filtered</label>{selectedIds.length ? <button className="text-xs font-bold text-brand underline underline-offset-4" type="button" onClick={() => onSelectionChange([])}>Clear selection</button> : null}</div>
-      <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">{filtered.length ? filtered.map((report) => <article className={`flex gap-3 rounded-2xl border p-3 transition ${selected?.id === report.id ? "border-brand bg-brand-soft" : "border-line bg-[#fbfdfc] hover:border-brand/40"}`} key={report.id}><input aria-label={`Select ${report.id}`} className="mt-1 size-4 shrink-0 accent-[#076b5a]" type="checkbox" checked={selectedIds.includes(report.id)} onChange={() => toggle(report.id)} /><button className="min-w-0 flex-1 text-left" type="button" onClick={() => onSelect(report)}><div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold text-brand">{report.id}</span><Badge tone={report.status === "verified-resolved" ? "safe" : "caution"}>{report.status.replaceAll("-", " ")}</Badge></div><p className="mt-2 text-sm font-bold">{report.category ?? "Unclassified issue"}</p><p className="mt-1 text-xs text-muted">{cityForLocation(report.locationLabel)} · {formatDate(report.createdAt)}</p></button></article>) : <p className="rounded-xl bg-[#fbfdfc] p-4 text-sm text-muted">No reports match these filters.</p>}</div>
+      <div className="mt-3 max-h-[31rem] space-y-2 overflow-y-auto pr-1">{loading && reports.length === 0 ? <ModeratorListSkeleton /> : filtered.length ? filtered.map((report) => <article className={`flex gap-3 rounded-2xl border p-3 transition ${selected?.id === report.id ? "border-brand bg-brand-soft" : "border-line bg-[#fbfdfc] hover:border-brand/40"}`} key={report.id}><input aria-label={`Select ${report.id}`} className="mt-1 size-4 shrink-0 accent-[#076b5a]" type="checkbox" checked={selectedIds.includes(report.id)} onChange={() => toggle(report.id)} /><button className="min-w-0 flex-1 text-left" type="button" onClick={() => onSelect(report)}><div className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold text-brand">{report.id}</span><Badge tone={report.status === "verified-resolved" ? "safe" : "caution"}>{report.status.replaceAll("-", " ")}</Badge></div><p className="mt-2 text-sm font-bold">{report.category ?? "Unclassified issue"}</p><p className="mt-1 text-xs text-muted">{cityForLocation(report.locationLabel)} · {formatDate(report.createdAt)}</p></button></article>) : <p className="rounded-xl bg-[#fbfdfc] p-4 text-sm text-muted">No reports match these filters.</p>}</div>
     </CardContent></Card>
     <Card className="rounded-3xl"><CardContent className="p-6 sm:p-7">{selected ? <CivicDetail report={selected} status={status} note={note} onDelete={() => onDelete([selected.id])} onNoteChange={onNoteChange} onStatusChange={onStatusChange} onUpdate={onUpdate} /> : <EmptyState icon={<Eye className="mx-auto text-brand" size={28} />} title="Select a civic report" detail="Read the full private report before publishing an action." />}</CardContent></Card>
   </div>;
 }
 
 function BulkActions({ count, onDelete, onInProgress, onResolved }: { count: number; onDelete: () => void; onInProgress: () => void; onResolved: () => void }) {
-  return <div className="mt-4 rounded-2xl border border-[#b8dfd3] bg-brand-soft p-3"><p className="text-sm font-bold text-brand">{count} report{count === 1 ? "" : "s"} selected</p><div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={onInProgress}>Mark in progress</Button><Button size="sm" variant="outline" onClick={onResolved}>Mark department resolved</Button><Button size="sm" variant="danger" onClick={onDelete}><Trash2 size={14} /> Delete selected</Button></div></div>;
+  const { busy } = useContext(ModeratorActivityContext);
+  return <div className="mt-4 rounded-2xl border border-[#b8dfd3] bg-brand-soft p-3"><p className="text-sm font-bold text-brand">{count} report{count === 1 ? "" : "s"} selected</p><div className="mt-3 flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={busy} onClick={onInProgress}>{busy ? "Updating…" : "Mark in progress"}</Button><Button size="sm" variant="outline" disabled={busy} onClick={onResolved}>Mark department resolved</Button><Button size="sm" variant="danger" onClick={onDelete}><Trash2 size={14} /> Delete selected</Button></div></div>;
 }
 
 function CivicDetail({ report, status, note, onDelete, onNoteChange, onStatusChange, onUpdate }: { report: ModeratorReport; status: ReportStatus; note: string; onDelete: () => void; onNoteChange: (note: string) => void; onStatusChange: (status: ReportStatus) => void; onUpdate: () => void }) {
+  const { busy } = useContext(ModeratorActivityContext);
   const mapsUrl = mapsLink(report.latitude, report.longitude);
-  return <><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-brand">{report.id}</p><h2 className="mt-2 font-display text-2xl font-bold">{report.category ?? "Civic issue"}</h2></div><div className="flex items-center gap-2">{mapsUrl ? <a className="grid size-9 place-items-center rounded-xl border border-line bg-white text-brand transition hover:bg-brand-soft" href={mapsUrl} target="_blank" rel="noreferrer" aria-label="Open civic report location in Google Maps" title="Open in Google Maps"><MapPin size={16} /><ExternalLink className="sr-only" size={12} /></a> : null}<Button variant="danger" size="sm" onClick={onDelete}><Trash2 size={15} /> Delete false report</Button></div></div><div className="mt-6 grid gap-4 sm:grid-cols-2"><Info label="Submitted" value={formatDate(report.createdAt)} /><Info label="Location" value={report.locationLabel} /><Info label="Coordinates" value={coordinateText(report.latitude, report.longitude)} /><Info label="Issue description" value={report.description} /><Info label="Duration" value={report.duration} /><Info label="People affected" value={report.affectedPeople ? String(report.affectedPeople) : "Not provided"} /><Info label="Extra details" value={report.extraDetails || "None"} /><Info label="Evidence" value={`${report.attachmentCount} file(s), stored privately`} /><Info label="Recipient" value={report.emailRecipient || "Not sent"} /></div><div className="mt-6 border-t border-line pt-6"><p className="eyebrow">Publish verified action</p><select className="mt-3 h-12 w-full rounded-xl border border-line px-3" value={status} onChange={(event) => onStatusChange(event.target.value as ReportStatus)}>{statuses.map((item) => <option key={item} value={item}>{item.replaceAll("-", " ")}</option>)}</select><textarea className="mt-3 min-h-28 w-full rounded-xl border border-line p-3" value={note} onChange={(event) => onNoteChange(event.target.value)} maxLength={280} placeholder="Public status note (required, 280 characters maximum)" /><Button className="mt-3" disabled={!note.trim()} onClick={onUpdate}><Eye size={16} /> Publish status update</Button></div></>;
+  return <><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-mono text-xs font-bold text-brand">{report.id}</p><h2 className="mt-2 font-display text-2xl font-bold">{report.category ?? "Civic issue"}</h2></div><div className="flex items-center gap-2">{mapsUrl ? <a className="grid size-9 place-items-center rounded-xl border border-line bg-white text-brand transition hover:bg-brand-soft" href={mapsUrl} target="_blank" rel="noreferrer" aria-label="Open civic report location in Google Maps" title="Open in Google Maps"><MapPin size={16} /><ExternalLink className="sr-only" size={12} /></a> : null}<Button variant="danger" size="sm" onClick={onDelete}><Trash2 size={15} /> Delete false report</Button></div></div><div className="mt-6 grid gap-4 sm:grid-cols-2"><Info label="Submitted" value={formatDate(report.createdAt)} /><Info label="Location" value={report.locationLabel} /><Info label="Coordinates" value={coordinateText(report.latitude, report.longitude)} /><Info label="Issue description" value={report.description} /><Info label="Duration" value={report.duration} /><Info label="People affected" value={report.affectedPeople ? String(report.affectedPeople) : "Not provided"} /><Info label="Extra details" value={report.extraDetails || "None"} /><Info label="Evidence" value={`${report.attachmentCount} file(s), stored privately`} /><Info label="Recipient" value={report.emailRecipient || "Not sent"} /></div><div className="mt-6 border-t border-line pt-6"><p className="eyebrow">Publish verified action</p><select className="mt-3 h-12 w-full rounded-xl border border-line px-3" value={status} onChange={(event) => onStatusChange(event.target.value as ReportStatus)}>{statuses.map((item) => <option key={item} value={item}>{item.replaceAll("-", " ")}</option>)}</select><textarea className="mt-3 min-h-28 w-full rounded-xl border border-line p-3" value={note} onChange={(event) => onNoteChange(event.target.value)} maxLength={280} placeholder="Public status note (required, 280 characters maximum)" /><Button className="mt-3" disabled={!note.trim() || busy} onClick={onUpdate}><Eye size={16} /> {busy ? "Publishing…" : "Publish status update"}</Button></div></>;
 }
 
 function CitySelect({ cities, value, onChange }: { cities: string[]; value: string; onChange: (value: string) => void }) {
@@ -456,7 +503,7 @@ function ModeratorNoticeViewport({ notices, onDismiss }: { notices: ModeratorNot
 
 function TabButton({ active, children, onClick }: { active: boolean; children: React.ReactNode; onClick: () => void }) { return <button className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition ${active ? "bg-white text-ink shadow-sm" : "text-muted hover:text-ink"}`} onClick={onClick} type="button">{children}</button>; }
 function CivicSenseStatusBadge({ status }: { status: CivicSenseStatus }) { const tone = status === "posted" ? "safe" : status === "rejected" ? "urgent" : status === "approved" ? "caution" : "neutral"; return <Badge tone={tone}>{status.replaceAll("-", " ")}</Badge>; }
-function Metric({ active = false, label, onClick, tone = "brand", value }: { active?: boolean; label: string; onClick?: () => void; tone?: "brand" | "danger" | "women"; value: string }) { const color = tone === "danger" ? "text-danger" : tone === "women" ? "text-[#a22a58]" : "text-brand"; return <button aria-pressed={active} className={`rounded-2xl border p-4 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${active ? "border-brand bg-brand-soft shadow-sm" : "border-line bg-[#fbfdfc] hover:-translate-y-0.5 hover:border-brand/50 hover:shadow-sm"}`} onClick={onClick} type="button"><p className="min-h-10 text-xs font-bold uppercase leading-5 tracking-[0.1em] text-muted">{label}</p><p className={`mt-2 font-display text-3xl font-bold ${color}`}>{value}</p></button>; }
+function Metric({ active = false, label, onClick, tone = "brand", value }: { active?: boolean; label: string; onClick?: () => void; tone?: "brand" | "danger" | "women"; value: string }) { const { loading } = useContext(ModeratorActivityContext); const color = tone === "danger" ? "text-danger" : tone === "women" ? "text-[#a22a58]" : "text-brand"; return <button aria-pressed={active} className={`rounded-2xl border p-4 text-left transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${active ? "border-brand bg-brand-soft shadow-sm" : "border-line bg-[#fbfdfc] hover:-translate-y-0.5 hover:border-brand/50 hover:shadow-sm"}`} onClick={onClick} type="button"><p className="min-h-10 text-xs font-bold uppercase leading-5 tracking-[0.1em] text-muted">{label}</p>{loading && value === "0" ? <Skeleton className="mt-3 h-9 w-12" /> : <p className={`mt-2 font-display text-3xl font-bold ${color}`}>{value}</p>}</button>; }
 function Info({ label, value }: { label: string; value: string }) { return <div><p className="text-xs font-bold uppercase tracking-[0.1em] text-muted">{label}</p><p className="mt-1 whitespace-pre-wrap text-sm leading-6">{value}</p></div>; }
 function EmptyState({ detail, icon, title }: { detail: string; icon: React.ReactNode; title: string }) { return <div className="grid min-h-72 place-items-center text-center"><div>{icon}<p className="mt-4 font-display text-xl font-bold">{title}</p><p className="mt-2 text-sm text-muted">{detail}</p></div></div>; }
 function MapLink({ href, label, tone = "brand" }: { href: string; label: string; tone?: "brand" | "danger" }) { return <a className={`mt-6 inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold text-white ${tone === "danger" ? "bg-danger" : "bg-brand"}`} href={href} target="_blank" rel="noreferrer"><MapPin size={16} /> {label} <ExternalLink size={14} /></a>; }

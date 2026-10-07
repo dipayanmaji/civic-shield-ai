@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { allowRequest, rateLimitedResponse } from "@/lib/security/rate-limit";
 import { sendTeamNotification } from "@/lib/notifications/team-email";
+import { createReportWriteToken } from "@/lib/security/report-token";
 import { createPersistentReport } from "@/lib/supabase/reports";
 import { isSupabaseConfigured } from "@/lib/supabase/server";
 import type { CivicReportInput } from "@/types/report";
@@ -33,7 +34,8 @@ export async function POST(request: Request) {
         `Evidence files: ${report.attachments?.length ?? 0}`,
       ].join("\r\n"),
     }).catch((error) => console.error("Civic report team notification failed:", error));
-    return NextResponse.json({ reportId }, { status: 201 });
+    // Only the creator receives this; it authorises later analysis/delivery updates for this report.
+    return NextResponse.json({ reportId, writeToken: createReportWriteToken(reportId) }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Report could not be saved." }, { status: 500 });
   }

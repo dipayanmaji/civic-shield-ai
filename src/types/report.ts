@@ -64,6 +64,9 @@ export interface CivicReport {
   affectedPeople?: string;
   extraDetails?: string;
   attachments?: CivicAttachment[];
+  // Issued by the server when the report is saved; authorises later updates to it.
+  // Never include it in anything sent to AI providers or shown publicly.
+  writeToken?: string;
   emailDelivery?: EmailDelivery;
   analysis?: SafetyAnalysis;
   category?: string;
@@ -82,6 +85,7 @@ export interface CivicReportInput {
   affectedPeople?: string;
   extraDetails?: string;
   attachments?: CivicAttachment[];
+  writeToken?: string;
 }
 
 export interface PublicCivicReport {
@@ -103,6 +107,10 @@ export interface PublicStatusEvent {
   createdAt: string;
 }
 
+// The only parts of an analysis that are safe to show publicly. The full analysis (email draft,
+// formal complaint) contains the exact address and coordinates and stays moderator-only.
+export type PublicAnalysis = Pick<SafetyAnalysis, "riskSummary" | "immediateActions" | "publicAlert">;
+
 export interface PublicCivicReportDetail extends PublicCivicReport {
   description: string;
   duration: string;
@@ -110,7 +118,7 @@ export interface PublicCivicReportDetail extends PublicCivicReport {
   extraDetails: string | null;
   attachmentCount: number;
   routeName: string | null;
-  analysis: SafetyAnalysis | null;
+  analysis: PublicAnalysis | null;
   statusEvents: PublicStatusEvent[];
 }
 

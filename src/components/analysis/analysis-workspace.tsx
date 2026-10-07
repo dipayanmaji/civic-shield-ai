@@ -7,6 +7,8 @@ import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Skeleton, SkeletonGroup } from "@/components/ui/skeleton";
+import { REPORT_TOKEN_HEADER } from "@/lib/security/report-token-header";
 import { getLocalAttachmentFiles } from "@/lib/storage/attachments";
 import { getLocalReport, markReportEmailSent, saveReportAnalysis } from "@/lib/storage/reports";
 import type { CivicReport, SafetyAnalysis } from "@/types/report";
@@ -34,17 +36,21 @@ export function AnalysisWorkspace({ reportId }: { reportId: string }) {
       setError("");
     }
     try {
-      const response = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ report: nextReport, variation }) });
+      // The write token only authorises saving to our own API; keep it out of the AI request.
+      const { writeToken, ...reportForAnalysis } = nextReport;
+      const response = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ report: reportForAnalysis, variation }) });
       if (!response.ok) throw new Error("Analysis could not be prepared.");
       const result = (await response.json()) as SafetyAnalysis;
       const updated = saveReportAnalysis(nextReport.id, result);
       setAnalysis(result);
       if (updated) setReport(updated);
-      void fetch(`/api/reports/${encodeURIComponent(nextReport.id)}/analysis`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ analysis: result }),
-      });
+      if (writeToken) {
+        void fetch(`/api/reports/${encodeURIComponent(nextReport.id)}/analysis`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", [REPORT_TOKEN_HEADER]: writeToken },
+          body: JSON.stringify({ analysis: result }),
+        });
+      }
     } catch {
       if (!isDraftRegeneration) setError("CivicShield could not prepare this analysis. Please try again.");
     } finally {
@@ -165,11 +171,13 @@ function MailComposer({ analysis, isRegenerating, onRegenerate, report, reportId
       if (!response.ok) throw new Error(result.error ?? "Email could not be sent.");
       const deliveryRecipient = result.deliveredTo ?? "CivicShield inbox";
       const savedDelivery = markReportEmailSent(reportId, { messageId: result.id, recipient: deliveryRecipient });
-      void fetch(`/api/reports/${encodeURIComponent(reportId)}/delivery`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messageId: result.id, recipient: deliveryRecipient }),
-      });
+      if (report.writeToken) {
+        void fetch(`/api/reports/${encodeURIComponent(reportId)}/delivery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", [REPORT_TOKEN_HEADER]: report.writeToken },
+          body: JSON.stringify({ messageId: result.id, recipient: deliveryRecipient }),
+        });
+      }
       setDelivery({ id: result.id, recipient: deliveryRecipient, sentAt: savedDelivery?.emailDelivery?.sentAt });
       setSendStatus("");
     } catch (error) {
@@ -225,7 +233,22 @@ function MailComposer({ analysis, isRegenerating, onRegenerate, report, reportId
 function DepartmentSuggestion({ departments, fallbackName, status }: { departments: SuggestedDepartment[]; fallbackName: string; status: "idle" | "loading" | "ready" }) {
   const firstDepartment = departments[0];
   if (status === "loading") {
-    return <div className="rounded-2xl border border-line bg-[#fbfdfc] p-4 text-sm font-semibold text-muted">Finding the nearest relevant department near the selected location...</div>;
+    // Same shape as the loaded card (icon, name, address, chips) so the layout does not jump.
+    return (
+      <SkeletonGroup label="Finding the nearest relevant department">
+        <div className="rounded-2xl border border-line bg-[#fbfdfc] p-4">
+          <div className="flex items-start gap-3">
+            <Skeleton className="size-10 shrink-0 rounded-xl" />
+            <div className="min-w-0 flex-1 space-y-2.5">
+              <Skeleton className="h-3 w-32" />
+              <Skeleton className="h-5 w-3/4" />
+              <Skeleton className="h-4 w-full" />
+              <div className="flex gap-2 pt-1"><Skeleton className="h-6 w-16 rounded-full" /><Skeleton className="h-6 w-28 rounded-full" /></div>
+            </div>
+          </div>
+        </div>
+      </SkeletonGroup>
+    );
   }
   if (!firstDepartment) {
     return <div className="rounded-2xl border border-[#ead9b8] bg-[#fffaf0] p-4 text-sm leading-6 text-[#725019]"><p className="font-bold">Your message will be sent to the {fallbackName}.</p><p className="mt-1">Your complaint is first received in the CivicShield inbox. After verification, it will be forwarded to the department.</p></div>;
